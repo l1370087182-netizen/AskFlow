@@ -9,6 +9,8 @@ collection 结构（对应 CLAUDE.md §7.2）：
 """
 from __future__ import annotations
 
+import threading
+
 from pymilvus import DataType, MilvusClient
 
 from core.config import settings
@@ -141,3 +143,26 @@ class VectorStore:
             }
             for hit in res[0]
         ]
+
+
+# ---------- 进程级单例 ----------
+
+_store_instance: VectorStore | None = None
+_store_lock = threading.Lock()
+
+
+def get_vector_store() -> VectorStore:
+    """获取进程内唯一的 VectorStore（双重检查锁，线程安全）。
+
+    两个原因不要每个请求都新建：
+    1. Milvus Lite 是单进程独占的嵌入式库，客户端构造会拉起/绑定本地
+       milvus 子进程，频繁新建容易造成连接抖动与锁残留；
+    2. 构造时会做 has_collection / load_collection，每请求重复纯属浪费。
+    全进程共享一个实例，Milvus Lite 子进程随后端进程同生命周期。
+    """
+    global _store_instance
+    if _store_instance is None:
+        with _store_lock:
+            if _store_instance is None:
+                _store_instance = VectorStore()
+    return _store_instance

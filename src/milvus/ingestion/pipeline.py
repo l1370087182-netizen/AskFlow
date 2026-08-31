@@ -19,7 +19,7 @@ from model.KnowledgeModel import KnowledgeModel
 from .embeddings import EmbeddingClient
 from .loader import KnowledgeLoader
 from .spliter import split_knowledge
-from .VectorStore import VectorStore
+from .VectorStore import VectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ class IngestionPipeline:
     ):
         self.loader = KnowledgeLoader(db)
         self.dao = self.loader.dao  # 复用同一个 DAO 回写状态，共享 Session
-        self.store = vector_store or VectorStore()
+        # 默认复用进程级单例：Milvus Lite 单进程独占，避免重复建连接
+        self.store = vector_store or get_vector_store()
         self.embedder = embedding_client or EmbeddingClient()
 
     def run(self, limit: int | None = None) -> dict:

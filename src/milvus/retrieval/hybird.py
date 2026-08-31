@@ -12,12 +12,15 @@ RRF（Reciprocal Rank Fusion）只看名次不看原始分：
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from sqlalchemy.orm import Session
 
 from .bm25 import BM25Retriever
 from .reranker import Reranker
 from .retriever import VectorRetriever
+
+logger = logging.getLogger(__name__)
 
 # RRF 平滑常数，60 是原论文默认值
 RRF_K = 60
@@ -82,9 +85,13 @@ class HybridRetriever:
 
         :return: [{knowledge_id, content, category, score, rrf_score, matched_by, source}, ...]
         """
-        # 1) 双路召回
+        # 1) 双路召回（向量路不可用时降级为单路，不让整个对话挂掉）
         bm25_hits = self.bm25.search(query, top_k=self.bm25_top, category=category)
-        vec_hits = self.vector.search(query, top_k=self.vector_top, category=category)
+        try:
+            vec_hits = self.vector.search(query, top_k=self.vector_top, category=category)
+        except Exception as e:  # noqa: BLE001 —— Milvus/Milvus Lite 不可用时保底
+            logger.warning("[retrieval] 向量路不可用，降级为纯 BM25：%s", e)
+            vec_hits = []
 
         # 2) RRF 融合，截断到 fuse_top
         fused = rrf_fuse([bm25_hits, vec_hits])[: self.fuse_top]
@@ -92,9 +99,13 @@ class HybridRetriever:
             return []
 
         # 3) Rerank 精排，以重排分作为最终 score
-        reranked = self.reranker.rerank(
-            query, [d["content"] for d in fused], top_k=top_k
-        )
+        try:
+            reranked = self.reranker.rerank(
+                query, [d["content"] for d in fused], top_k=top_k
+            )
+        except Exception as e:  # noqa: BLE001 —— rerank API 挂了也不阻断对话
+            logger.warning("[retrieval] Rerank 不可用，按 RRF 顺序返回：%s", e)
+            return [{**doc, "score": doc["rrf_score"]} for doc in fused[:top_k]]
         results = []
         for r in reranked:
             doc = fused[r["index"]]

@@ -390,3 +390,4 @@ uv run python scripts/run_spider.py -w 3 --reset   # 3 个 worker，全量重爬
 2. **文件拼写**：`konwledge_controller.py` 拼错了（knowledge），后续迁移 controller 时顺手改掉。
 3. **密钥安全**：`.env` 里有真实密钥，确认 `.gitignore` 已忽略，切勿提交。
 4. **大小写**：现目录 `DAO/` 与飞书架构的 `dao/` 不一致，暂保留，大整理时统一。
+5. **Milvus Lite 单进程独占**：配置了 `MILVUS_LITE_PATH` 时，同一个 `.db` 文件同一时刻只能被一个进程打开（官方不支持多进程并发，见 milvus-lite issue #195/#264）。后端运行时不要另起进程跑 `vectorize.py`，否则后来者会报 `Fail connecting to server on 127.0.0.1:<随机端口>`（该端口是 Milvus Lite 拉起的本地子进程，不在任何配置里）。正确姿势：停后端再跑离线脚本，或直接用后端内置的 `POST /api/embedding/run`（进程内执行，无冲突）。`vectorize.py` 已内置后端存活检测；`deploy/setup.sh` 已改为「先向量化、后启后端」。另外混合检索已做降级：向量路不可用时自动退化为纯 BM25，对话不整体失败；`VectorStore` 为进程级单例（`get_vector_store()`），勿改回每请求新建。

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from milvus.ingestion.embeddings import EmbeddingClient
-from milvus.ingestion.VectorStore import VectorStore
+from milvus.ingestion.VectorStore import VectorStore, get_vector_store
 
 
 class VectorRetriever:
@@ -17,7 +17,8 @@ class VectorRetriever:
         store: VectorStore | None = None,
         embedder: EmbeddingClient | None = None,
     ):
-        self.store = store or VectorStore()
+        # 默认复用进程级单例：Milvus Lite 单进程独占，避免每请求新建连接
+        self.store = store or get_vector_store()
         self.embedder = embedder or EmbeddingClient()
 
     def search(
