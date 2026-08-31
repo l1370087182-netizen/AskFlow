@@ -23,9 +23,9 @@ class VectorStore:
     DIM = 1024  # bge-m3 输出维度
 
     def __init__(self, host: str | None = None, port: int | None = None):
-        if settings.MILVUS_URI:
+        if settings.MILVUS_LITE_PATH:
             # 嵌入式 Milvus Lite（单文件库），低内存服务器部署用；本地开发留空走 Standalone
-            self.client = MilvusClient(uri=settings.MILVUS_URI)
+            self.client = MilvusClient(uri=settings.MILVUS_LITE_PATH)
         else:
             host = host or settings.MILVUS_HOST
             port = port or settings.MILVUS_PORT
