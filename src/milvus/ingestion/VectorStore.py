@@ -23,10 +23,14 @@ class VectorStore:
     DIM = 1024  # bge-m3 输出维度
 
     def __init__(self, host: str | None = None, port: int | None = None):
-        host = host or settings.MILVUS_HOST
-        port = port or settings.MILVUS_PORT
-        # MilvusClient 是 pymilvus 的新式轻量 API，uri 走 HTTP 协议
-        self.client = MilvusClient(uri=f"http://{host}:{port}")
+        if settings.MILVUS_URI:
+            # 嵌入式 Milvus Lite（单文件库），低内存服务器部署用；本地开发留空走 Standalone
+            self.client = MilvusClient(uri=settings.MILVUS_URI)
+        else:
+            host = host or settings.MILVUS_HOST
+            port = port or settings.MILVUS_PORT
+            # MilvusClient 是 pymilvus 的新式轻量 API，uri 走 HTTP 协议
+            self.client = MilvusClient(uri=f"http://{host}:{port}")
         self._ensure_collection()
 
     # ---------- 集合管理 ----------

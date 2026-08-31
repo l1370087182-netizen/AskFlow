@@ -22,3 +22,6 @@ storage/
 .cursor/
 .idea/
 .vscode/
+
+# 部署包（含密钥与数据 dump，绝不入库）
+deploy/

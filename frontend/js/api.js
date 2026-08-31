@@ -1,8 +1,9 @@
 // API 封装：后端基址 + 通用请求/SSE 流读取
-// 后端端口 4399（与前端 10000 分离），用当前访问的 host 拼基址，
+// 本地开发：前端 10001、后端独立 4399，用当前访问的 host 拼基址，
 // 本机（127.0.0.1）和局域网（192.168.x.x）访问都能通。
+// 部署环境：Nginx 同源反代 /api 到后端，基址留空走同源。
 
-const API_BASE = `http://${location.hostname}:4399`;
+const API_BASE = location.port === '10001' ? `http://${location.hostname}:4399` : '';
 
 async function apiGet(path) {
   const resp = await fetch(API_BASE + path);

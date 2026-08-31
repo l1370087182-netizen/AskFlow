@@ -42,6 +42,7 @@ class Settings(BaseSettings):
         # ---------- Milvus ----------
     MILVUS_HOST: str = Field(default="127.0.0.1", description="Milvus主机")
     MILVUS_PORT: int = Field(default=19530, description="Milvus端口")
+    MILVUS_URI: str = Field(default="", description="非空则用嵌入式 Milvus Lite（本地文件路径），忽略 HOST/PORT；低内存服务器部署用")
 
         # ---------- Rerank ----------
     RERANK_MODEL: str = Field(default="BAAI/bge-reranker-v2-m3", description="重排序模型")
