@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知识库 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统</div>
+      <nav class="nav">
+        <a href="index.html">每日卡片</a>
+        <a href="chat.html">对话学习</a>
+        <a href="kb.html" class="active">知识库</a>
+        <a href="interview.html">模拟面试</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="home-hero">
+      <h1>知识库</h1>
+      <p id="kb-sub">按分类浏览已入库的技术知识</p>
+    </section>
+
+    <div id="kb-state" class="state-box">正在加载分类…</div>
+    <div id="kb-grid" class="kb-grid" style="display:none"></div>
+
+    <section id="kb-list-wrap" style="display:none">
+      <div class="kb-list-head">
+        <h2 id="kb-list-title"></h2>
+        <span id="kb-list-count" class="rounds"></span>
+      </div>
+      <div id="kb-list" class="kb-list"></div>
+    </section>
+  </main>
+
+  <!-- 知识详情弹窗 -->
+  <div id="kb-modal" class="modal-mask" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div id="modal-meta" class="modal-meta"></div>
+      <div id="modal-body" class="modal-body rich"></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/kb.js"></script>
+</body>
+</html>

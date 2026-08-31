@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能技术学习系统 · 每日卡片</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统</div>
+      <nav class="nav">
+        <a href="index.html" class="active">每日卡片</a>
+        <a href="chat.html">对话学习</a>
+        <a href="kb.html">知识库</a>
+        <a href="interview.html">模拟面试</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="home-hero">
+      <h1>今日知识点</h1>
+      <p>每天一个小概念，碎片时间也能系统学习</p>
+    </section>
+
+    <div id="card-state" class="state-box">正在加载今日卡片…</div>
+
+    <section id="daily-card" class="daily-card" style="display:none">
+      <div class="card-deco" aria-hidden="true">💡</div>
+      <div class="card-head">
+        <span id="card-date" class="date-badge"></span>
+        <span id="card-category" class="category-tag"></span>
+      </div>
+      <div id="card-term" class="term"></div>
+      <div id="card-alias" class="alias" style="display:none"></div>
+      <p id="card-brief" class="brief"></p>
+
+      <section id="card-detail-wrap" class="card-section" style="display:none">
+        <h3>📖 详细讲解</h3>
+        <p id="card-detail"></p>
+      </section>
+      <section id="card-example-wrap" class="card-section" style="display:none">
+        <h3>💻 示例</h3>
+        <pre id="card-example"></pre>
+      </section>
+
+      <div class="divider"></div>
+      <div class="actions">
+        <button id="btn-ask" class="btn btn-primary">🙋 去问 AI（讲解模式）</button>
+        <button id="btn-teach" class="btn btn-ghost">👨‍🏫 我来教 AI（费曼模式）</button>
+      </div>
+    </section>
+
+    <section id="stat-row" class="stat-row" style="display:none">
+      <div class="stat"><b id="stat-knowledge">-</b><span>知识条目</span></div>
+      <div class="stat"><b id="stat-terms">-</b><span>术语卡片</span></div>
+      <div class="stat"><b id="stat-evals">-</b><span>讲解评估</span></div>
+      <div class="stat"><b id="stat-avg">-</b><span>平均掌握分</span></div>
+    </section>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/home.js"></script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>模拟面试 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统</div>
+      <nav class="nav">
+        <a href="index.html">每日卡片</a>
+        <a href="chat.html">对话学习</a>
+        <a href="kb.html">知识库</a>
+        <a href="interview.html" class="active">模拟面试</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 上传面板 -->
+    <section id="setup" class="daily-card">
+      <div class="card-deco" aria-hidden="true">🎯</div>
+      <h2 style="font-size:22px;margin-bottom:6px">模拟面试</h2>
+      <p class="brief">上传 <b>JD 截图</b> 和 <b>简历截图</b>，AI 面试官会围绕岗位考点、结合你的简历逐题提问，结束给出总评和补强建议。</p>
+      <div class="iv-uploads">
+        <label class="iv-file">📄 JD 截图<input id="f-jd" type="file" accept="image/*"><span id="f-jd-name">未选择</span></label>
+        <label class="iv-file">👤 简历截图<input id="f-resume" type="file" accept="image/*"><span id="f-resume-name">未选择</span></label>
+      </div>
+      <div class="actions" style="margin-top:20px">
+        <button id="btn-start" class="btn btn-primary">开始面试</button>
+      </div>
+      <p id="setup-err" class="row-meta" style="margin-top:10px;color:var(--red)"></p>
+    </section>
+
+    <!-- 面试对话面板 -->
+    <section id="iv-chat" style="display:none">
+      <div class="iv-meta daily-card" style="padding:18px 24px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <b id="iv-title" style="font-size:17px"></b>
+          <span id="iv-round" class="rounds"></span>
+          <span style="flex:1"></span>
+          <button id="btn-finish" class="btn btn-danger-soft" style="padding:6px 16px;font-size:13px">结束面试，生成总评</button>
+        </div>
+        <div id="iv-tags" class="sources" style="margin-top:10px"></div>
+      </div>
+      <div id="iv-msgs" class="msg-list" style="max-height:none;padding:20px 0"></div>
+      <div class="input-bar" style="border:none;padding:10px 0 0">
+        <div class="input-inner">
+          <textarea id="iv-input" rows="1" placeholder="回答面试官的问题…"></textarea>
+          <button id="iv-send" class="btn btn-primary">发送</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/interview.js"></script>
+</body>
+</html>

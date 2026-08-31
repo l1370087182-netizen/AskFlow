@@ -1,0 +1,70 @@
+"""
+任务队列：基于 Redis List 的分布式队列。
+只负责 push / pop / 长度，不去重（去重交给 deduplicator）。
+"""
+
+import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
+from core.config import settings
+from typing import Any
+import json
+
+class TaskQueue:
+    """爬虫任务队列"""
+
+    def __init__(self, queue_key: str="crawl:queue") -> None:
+        self.queue_key = queue_key
+        self.r = redis.Redis(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            db=settings.REDIS_DB,
+            password=settings.REDIS_PASSWORD or None,
+            decode_responses=True,
+            # blpop 是阻塞命令，redis-py 默认的超时竞态 + 内部重试会把
+            # 5s 的等待放大到近 1 分钟。关掉内部重试，由 worker 外层循环负责重试
+            retry=Retry(NoBackoff(), 0),
+        )
+
+    def ping(self) ->bool:
+        """检查Redis连接"""
+        return bool(self.r.ping())
+
+    def push(self, task: dict[str, Any]) -> None:
+        """添加任务到队列(右侧进入)"""
+        self.r.rpush(self.queue_key, json.dumps(task, ensure_ascii=False))
+    
+    def push_many(self, tasks: list[dict[str, Any]]) -> int:
+        """批量添加任务到队列(右侧进入)"""
+        if not tasks:
+            return 0
+        pipe = self.r.pipeline()
+        for task in tasks:
+            pipe.rpush(self.queue_key, json.dumps(task, ensure_ascii=False))
+        pipe.execute()
+        return len(tasks)
+
+    def pop(self, timeout: int=5) -> dict[str, Any] | None:
+        """
+        阻塞出队（左侧出，多 worker 安全）。
+        timeout 秒内无任务返回 None。
+        """
+        try:
+            item = self.r.blpop(self.queue_key, timeout=timeout)
+        except redis.exceptions.TimeoutError:
+            # redis-py 已知竞态：socket 超时偶尔先于 BLPOP 的 nil 响应到达。
+            # 队列契约是「没任务返回 None」，不能因此杀死 worker 线程
+            return None
+        if item is None:
+            return None
+        _, raw = item
+        return json.loads(raw)
+
+    def size(self) -> int:
+        """获取队列长度"""
+        return self.r.llen(self.queue_key)
+
+    def clear(self) -> None:
+        """清空队列"""
+        self.r.delete(self.queue_key)
+

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>对话学习 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统</div>
+      <nav class="nav">
+        <a href="index.html">每日卡片</a>
+        <a href="chat.html" class="active">对话学习</a>
+        <a href="kb.html">知识库</a>
+        <a href="interview.html">模拟面试</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="chat-layout">
+    <!-- 左侧：会话列表 -->
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <button id="btn-new" class="btn btn-primary btn-small">＋ 新建对话</button>
+        <button id="btn-settings" class="icon-btn" title="外部模型设置">⚙️</button>
+      </div>
+      <div id="session-list" class="session-list">
+        <div id="session-mode-label" class="session-mode-label"></div>
+        <div id="session-items"></div>
+      </div>
+      <div id="llm-badge" class="llm-badge">默认模型</div>
+    </aside>
+
+    <!-- 右侧：对话区 -->
+    <div class="chat-main chat-wrap">
+      <div class="chat-toolbar">
+        <span id="model-chip" class="model-chip" title="当前对话所用模型，可在左侧 ⚙️ 修改">🤖 默认模型</span>
+        <div class="mode-switch">
+          <button id="mode-ask" class="active">🙋 讲解模式（AI 当老师）</button>
+          <button id="mode-teach">👨‍ 费曼模式（AI 当学生）</button>
+        </div>
+        <div id="topic-bar" class="topic-bar" style="display:none">
+          <span>主题：<span id="topic-name" class="topic-name"></span></span>
+          <span id="topic-rounds" class="rounds"></span>
+          <button id="btn-finish" class="btn btn-danger-soft" style="padding:5px 14px;font-size:12px">结束讲解，开始评分</button>
+        </div>
+      </div>
+
+      <div id="msg-list" class="msg-list"></div>
+
+      <div class="input-bar">
+        <div class="input-inner">
+          <textarea id="input" rows="1" placeholder="输入想学的问题…"></textarea>
+          <button id="btn-send" class="btn btn-primary">发送</button>
+        </div>
+        <div id="hint" class="hint"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 外部模型设置弹窗 -->
+  <div id="set-modal" class="modal-mask" style="display:none">
+    <div class="modal small">
+      <div class="modal-head">
+        <h3>外部模型设置</h3>
+        <button id="set-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <p class="set-tip">
+        填写后对话将调用你配置的模型；留空则用系统默认模型。
+        支持 <b>OpenAI 兼容</b>（SiliconFlow / OpenAI / DeepSeek…）与 <b>Anthropic</b>
+        两种协议，选「自动识别」时按地址判断（含 anthropic 走 Anthropic）。
+        配置只保存在本浏览器。
+      </p>
+      <label class="set-row">协议
+        <select id="set-provider">
+          <option value="auto">自动识别</option>
+          <option value="openai">OpenAI 兼容</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </label>
+      <label class="set-row">API 地址
+        <input id="set-url" placeholder="如 https://api.openai.com/v1 或 https://api.anthropic.com">
+      </label>
+      <label class="set-row">API Key
+        <input id="set-key" type="password" placeholder="sk-...">
+      </label>
+      <label class="set-row">模型名
+        <input id="set-model" placeholder="如 gpt-4o-mini / claude-opus-4-8（留空用默认）">
+      </label>
+      <div class="set-actions">
+        <button id="set-test" class="btn btn-ghost">测试连接</button>
+        <span id="set-result" class="row-meta"></span>
+        <span style="flex:1"></span>
+        <button id="set-clear" class="btn btn-danger-soft">清除</button>
+        <button id="set-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/chat.js"></script>
+</body>
+</html>
