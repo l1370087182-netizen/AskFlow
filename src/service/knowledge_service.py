@@ -17,6 +17,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import threading
@@ -24,13 +25,15 @@ import time
 from socket import getaddrinfo
 from urllib.parse import urlparse
 
+import httpx
 import redis
+from bs4 import BeautifulSoup
 
 from core.config import settings
 from database.session import SessionLocal
 from DAO.knowledge_dao import KnowledgeDAO
 from generation.llm import build_llm_for_user
-from generation.prompts import CLEAN_SYSTEM_PROMPT
+from generation.prompts import AI_ADD_SYSTEM_PROMPT, CLEAN_SYSTEM_PROMPT
 from milvus.ingestion.pipeline import IngestionPipeline
 from model.KnowledgeModel import KnowledgeModel
 from spider.shallow_crawler import ShallowCrawler
@@ -478,3 +481,154 @@ def _run_task(task_id: str) -> None:
             task_id, state["status"],
             state["done_pages"], state["failed_pages"], state["skipped_pages"],
         )
+
+
+# ---------- AI 添加（对话式定题 → 自动爬取） ----------
+
+# 对话历史上限（每轮全量回传，截断防 token 爆炸）
+AI_ADD_MAX_HISTORY = 12
+
+
+def _parse_ai_add_reply(text: str) -> dict | None:
+    """解析模型的 AI 添加回复为 dict；剥代码围栏、容忍前后杂文，失败返回 None"""
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+    try:
+        data = json.loads(t)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start, end = t.find("{"), t.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(t[start : end + 1])
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def probe_url(url: str, timeout: float = 15.0) -> tuple[bool, str, str]:
+    """探测目标地址可达性，返回 (ok, 最终地址(跟随重定向), 页面标题)。
+
+    模型给的 URL 可能失效/重定向，先探一把再入队，
+    避免用户等一个注定失败的任务；标题用于前端展示「将爬取：XXX」。
+    """
+    try:
+        resp = httpx.get(
+            url, timeout=timeout, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; RAG-KB/1.0)"},
+        )
+        resp.raise_for_status()
+        # 只取头部一段找 title，避免大页面全量进 BeautifulSoup
+        soup = BeautifulSoup(resp.text[:20000], "lxml")
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        return True, str(resp.url), title
+    except Exception as e:  # noqa: BLE001 —— 探测失败不抛，降级为追问
+        logger.info("[kb-ai-add] 探测失败 %s：%s", url, e)
+        return False, url, ""
+
+
+def ai_add_chat(db, uid: int, messages: list[dict]) -> dict:
+    """AI 添加：用户说想学什么 → 模型判断（追问/纠错/直接爬）→ 提交爬取任务。
+
+    :return: {"action": "ask"|"crawl", "message", "proposal", "task_id"}
+    :raises CrawlSubmitError: 400（未配置模型/空输入）或 502（模型调用失败）
+    """
+    llm = build_llm_for_user(db, uid)
+    if llm is None:
+        raise CrawlSubmitError(
+            400, "尚未配置个人大模型，请先到「对话学习」页 ⚙️ 模型配置中保存模型后再用 AI 添加"
+        )
+
+    history = [
+        {"role": m["role"], "content": m["content"][:1000]}
+        for m in messages[-AI_ADD_MAX_HISTORY:]
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+    if not history:
+        raise CrawlSubmitError(400, "请先告诉我你想了解什么")
+
+    try:
+        reply = llm.chat(
+            [{"role": "system", "content": AI_ADD_SYSTEM_PROMPT}, *history],
+            temperature=0.3,
+        )
+    except Exception as e:  # noqa: BLE001 —— 模型调用失败如实上报
+        raise CrawlSubmitError(502, f"模型调用失败：{e}") from e
+
+    data = _parse_ai_add_reply(reply)
+    if not data or data.get("action") not in ("ask", "crawl"):
+        # 解析失败：把原文当作追问返回，对话不中断
+        return {
+            "action": "ask",
+            "message": reply.strip()[:500] or "请再补充一点信息",
+            "proposal": None,
+            "task_id": None,
+        }
+
+    if data["action"] == "ask":
+        return {
+            "action": "ask",
+            "message": str(data.get("message", "")).strip()[:500] or "请再补充一点信息",
+            "proposal": None,
+            "task_id": None,
+        }
+
+    # ---- action == crawl：校验 → 探活 → 提交任务 ----
+    url = str(data.get("url", "")).strip()
+    try:
+        url = validate_public_url(url)
+    except ValueError as e:
+        return {
+            "action": "ask",
+            "message": f"模型给出的地址不可用（{e}），请换个说法描述你想学的内容",
+            "proposal": None,
+            "task_id": None,
+        }
+
+    ok, final_url, probed_title = probe_url(url)
+    if not ok:
+        return {
+            "action": "ask",
+            "message": "我试着访问了模型推荐的文档地址，但它没有响应。请换个说法，或把主题描述得更具体一些",
+            "proposal": None,
+            "task_id": None,
+        }
+
+    try:
+        max_pages = max(1, min(20, int(data.get("max_pages", 10))))
+    except (TypeError, ValueError):
+        max_pages = 10
+    category = (
+        str(data.get("category", "") or "general").strip().lower()[:128] or "general"
+    )
+    title = str(data.get("title", "") or probed_title or final_url)[:512]
+
+    try:
+        task_id = submit_crawl(
+            db, uid=uid, url=final_url, category=category, max_pages=max_pages
+        )
+    except CrawlSubmitError as e:
+        # 已有活跃任务（409）：把 task_id 透传出去，前端可直接跳进度面板；
+        # 其余错误转为追问，不打断对话
+        return {
+            "action": "ask",
+            "message": e.message,
+            "proposal": None,
+            "task_id": e.task_id,
+        }
+
+    return {
+        "action": "crawl",
+        "message": str(data.get("message", "")).strip()[:500]
+        or f"开始爬取：{title}",
+        "proposal": {
+            "url": final_url,
+            "title": title,
+            "category": category,
+            "max_pages": max_pages,
+        },
+        "task_id": task_id,
+    }

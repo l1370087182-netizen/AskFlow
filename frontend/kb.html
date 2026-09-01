@@ -50,6 +50,7 @@
       <div class="my-toolbar">
         <button id="btn-add" class="btn btn-ghost" type="button">＋ 手工添加</button>
         <button id="btn-crawl" class="btn btn-ghost" type="button">🕷 爬取整站</button>
+        <button id="btn-ai-add" class="btn btn-ghost" type="button">🤖 AI 添加</button>
         <span id="my-count" class="row-meta"></span>
       </div>
 
@@ -119,6 +120,26 @@
         <button id="crawl-submit" class="btn btn-primary" type="button">提交爬取</button>
         <span id="crawl-msg" class="auth-msg"></span>
       </div>
+    </div>
+  </div>
+
+  <!-- AI 添加弹窗（对话式定题 → 自动爬取） -->
+  <div id="ai-modal" class="modal-mask" style="display:none">
+    <div class="modal small">
+      <div class="modal-head">
+        <h3>AI 添加知识</h3>
+        <button id="ai-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div class="set-tip">
+        告诉 AI 你想了解什么（如「pydantic」「mysql 索引」），它会自动挑选官方文档爬取入库；
+        主题太宽泛（如「python」）会先追问具体方向，疑似打错字会先向你确认。
+      </div>
+      <div id="ai-msgs" class="ai-msgs"></div>
+      <div class="ai-input-row">
+        <input id="ai-input" maxlength="200" placeholder="如：pydantic / fastapi 依赖注入 / redis 缓存…">
+        <button id="ai-send" class="btn btn-primary" type="button">发送</button>
+      </div>
+      <div class="set-actions"><span id="ai-tip" class="auth-msg"></span></div>
     </div>
   </div>
 

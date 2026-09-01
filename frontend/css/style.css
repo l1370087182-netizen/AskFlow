@@ -502,3 +502,31 @@ a { color: var(--brand); text-decoration: none; }
 .pg-ok { color: var(--green); font-weight: 700; }
 .pg-fail { color: var(--red); font-weight: 700; }
 .crawl-summary { margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
+
+/* AI 添加对话弹窗 */
+.ai-msgs {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 300px; overflow-y: auto;
+  margin: 10px 0 14px; padding: 2px;
+}
+.ai-msg {
+  max-width: 86%; padding: 8px 13px; border-radius: 13px;
+  font-size: 13px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ai-msg.user {
+  align-self: flex-end; background: var(--brand); color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.ai-msg.assistant {
+  align-self: flex-start; background: var(--bg); color: var(--ink-2);
+  border-bottom-left-radius: 4px;
+}
+.ai-input-row { display: flex; gap: 8px; }
+.ai-input-row input {
+  flex: 1; min-width: 0;
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 12px; font-size: 13px; font-family: inherit;
+  background: var(--bg); outline: none;
+}
+.ai-input-row input:focus { border-color: var(--brand); background: #fff; }

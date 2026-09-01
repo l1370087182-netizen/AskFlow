@@ -413,11 +413,83 @@ document.getElementById('crawl-panel-close').addEventListener('click', () => {
   document.getElementById('crawl-panel').style.display = 'none';
 });
 
+// ---------- 我的知识：AI 添加（对话式定题 → 自动爬取） ----------
+
+// 对话历史（模态框打开期间内存保持；关闭即重置）
+let aiHistory = [];
+
+function openAiModal() {
+  aiHistory = [];
+  document.getElementById('ai-msgs').innerHTML = '';
+  appendAiMsg('assistant', '想了解什么？告诉我主题，我来找最合适的官方文档爬进你的知识库。');
+  setAiTip('');
+  document.getElementById('ai-modal').style.display = '';
+  document.getElementById('ai-input').focus();
+}
+
+function closeAiModal() {
+  document.getElementById('ai-modal').style.display = 'none';
+}
+
+function appendAiMsg(role, text) {
+  const box = document.getElementById('ai-msgs');
+  const div = document.createElement('div');
+  div.className = 'ai-msg ' + role;
+  div.textContent = text;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setAiTip(text, isErr) {
+  const el = document.getElementById('ai-tip');
+  el.textContent = text;
+  el.className = 'auth-msg' + (isErr ? ' err' : ' ok');
+}
+
+async function sendAiAdd() {
+  const input = document.getElementById('ai-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendAiMsg('user', text);
+  aiHistory.push({ role: 'user', content: text });
+
+  const btn = document.getElementById('ai-send');
+  btn.disabled = true;
+  setAiTip('AI 正在思考…');
+  try {
+    const r = await apiPostJson('/api/knowledge/my/ai-add', { messages: aiHistory });
+    aiHistory.push({ role: 'assistant', content: r.message });
+    appendAiMsg('assistant', r.message);
+    setAiTip('');
+    // action=crawl（已提交任务）或 ask 但带回活跃任务（409）→ 直接跳进度面板
+    if (r.task_id) {
+      closeAiModal();
+      startCrawlPolling(r.task_id);
+    }
+  } catch (e) {
+    setAiTip(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-ai-add').addEventListener('click', openAiModal);
+document.getElementById('ai-close').addEventListener('click', closeAiModal);
+document.getElementById('ai-send').addEventListener('click', sendAiAdd);
+document.getElementById('ai-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendAiAdd();
+});
+document.getElementById('ai-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'ai-modal') closeAiModal();
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeModal();
   closeEditModal();
   closeCrawlModal();
+  closeAiModal();
 });
 
 // ---------- 小工具 ----------

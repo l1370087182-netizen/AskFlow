@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Literal
 
 
 class KnowledgeItem(BaseModel):
@@ -94,3 +95,40 @@ class CrawlTaskOut(BaseModel):
     heartbeat: float = 0.0
     created_at: float = 0.0
     finished_at: float = 0.0
+
+
+# ---------- AI 添加（对话式定题 → 自动爬取） ----------
+
+class AIAddMessage(BaseModel):
+    """AI 添加对话的一条历史消息"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class AIAddRequest(BaseModel):
+    """AI 添加请求：前端每轮带上完整对话历史（服务端不存状态）"""
+
+    messages: list[AIAddMessage] = Field(..., min_length=1, max_length=20)
+
+
+class AIAddProposal(BaseModel):
+    """AI 给出的爬取建议（action=crawl 时）"""
+
+    url: str
+    title: str = ""
+    category: str = "general"
+    max_pages: int = 10
+
+
+class AIAddResponse(BaseModel):
+    """AI 添加响应。
+
+    action=ask   —— AI 追问/确认纠错，对话继续（task_id 可能带回正在进行的任务）
+    action=crawl —— AI 已提交爬取任务，task_id 必带，前端直接跳进度面板
+    """
+
+    action: Literal["ask", "crawl"]
+    message: str
+    proposal: AIAddProposal | None = None
+    task_id: str | None = None

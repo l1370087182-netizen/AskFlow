@@ -31,6 +31,8 @@ from schema.knowledge import (
     KnowledgeMyUpdateRequest,
     KnowledgeCrawlRequest,
     CrawlTaskOut,
+    AIAddRequest,
+    AIAddResponse,
 )
 from service import knowledge_service as kb_service
 
@@ -158,6 +160,31 @@ def my_crawl_progress(
     if state is None:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     return CrawlTaskOut(**state)
+
+
+@router.post("/my/ai-add", response_model=AIAddResponse)
+def my_ai_add(
+    body: AIAddRequest,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """AI 添加：对话式定题 → 自动提交爬取。
+
+    每轮带全量对话历史（服务端不存状态）。模型判断：
+    主题宽泛/疑似拼错 → action=ask 追问或确认纠错；
+    主题明确 → 选官方文档根地址，探活后直接提交爬取，action=crawl 带 task_id。
+    """
+    try:
+        return AIAddResponse(
+            **kb_service.ai_add_chat(
+                db, user.id, [m.model_dump() for m in body.messages]
+            )
+        )
+    except kb_service.CrawlSubmitError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"message": e.message, "task_id": e.task_id},
+        ) from e
 
 
 @router.put("/my/{knowledge_id}", response_model=KnowledgeItem)
