@@ -34,12 +34,27 @@ async function _errDetail(resp) {
   return detail;
 }
 
+/**
+ * 统一失败处理：401 跳登录；抛出的 Error 额外携带
+ *   err.status —— HTTP 状态码
+ *   err.detail —— 后端 detail 原样（字符串或对象，如 409 时含 task_id）
+ * message 对字符串 detail 保持原行为，对象 detail 取其 message 字段。
+ */
+async function _fail(resp) {
+  const detail = await _errDetail(resp);
+  const msg = typeof detail === 'string'
+    ? detail
+    : (detail && detail.message) || resp.statusText;
+  const err = new Error(msg);
+  err.status = resp.status;
+  err.detail = detail;
+  handleAuthError(resp);
+  throw err;
+}
+
 async function apiGet(path) {
   const resp = await fetch(API_BASE + path, { headers: authHeaders() });
-  if (!resp.ok) {
-    handleAuthError(resp);
-    throw new Error(await _errDetail(resp));
-  }
+  if (!resp.ok) throw await _fail(resp);
   return resp.json();
 }
 
@@ -49,10 +64,7 @@ async function apiPostJson(path, body) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) {
-    handleAuthError(resp);
-    throw new Error(await _errDetail(resp));
-  }
+  if (!resp.ok) throw await _fail(resp);
   return resp.json();
 }
 
@@ -62,10 +74,7 @@ async function apiPutJson(path, body) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) {
-    handleAuthError(resp);
-    throw new Error(await _errDetail(resp));
-  }
+  if (!resp.ok) throw await _fail(resp);
   return resp.json();
 }
 
@@ -74,10 +83,7 @@ async function apiDelete(path) {
     method: 'DELETE',
     headers: authHeaders(),
   });
-  if (!resp.ok) {
-    handleAuthError(resp);
-    throw new Error(await _errDetail(resp));
-  }
+  if (!resp.ok) throw await _fail(resp);
   return resp.json();
 }
 

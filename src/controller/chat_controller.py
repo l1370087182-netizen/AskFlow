@@ -19,13 +19,12 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from DAO.user_dao import UserDAO
 from auth.deps import get_current_user
 from core.config import settings
 from database.session import SessionLocal
 from evaluate.evaluator import save_evaluation
 from generation.chain import ChainBuilder, format_context
-from generation.llm import ChatLLM
+from generation.llm import ChatLLM, build_llm_for_user
 from generation.prompts import FINISH_KEYWORDS, MAX_TEACH_ROUNDS
 from model.UserModel import UserModel
 from schema.chat import ChatRequest, LLMConfig, PingRequest
@@ -65,24 +64,6 @@ def _build_llm(cfg: LLMConfig | None) -> ChatLLM:
     return ChatLLM()
 
 
-def _build_llm_for_user(db: Session, uid: int) -> ChatLLM:
-    """按用户私有模型配置构造 ChatLLM（阶段 11：替代请求透传，配置存服务端）"""
-    cfg = UserDAO(db).get_llm_config(uid)
-    if cfg["base_url"].strip() and cfg["api_key"].strip():
-        provider = cfg["provider"] or "auto"
-        model = cfg["model"].strip()
-        if not model:
-            resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
-            model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
-        return ChatLLM(
-            provider=provider,
-            base_url=cfg["base_url"].strip(),
-            api_key=cfg["api_key"].strip(),
-            model=model,
-        )
-    return ChatLLM()
-
-
 def _stream_events(
     llm: ChatLLM,
     messages: list[dict],
@@ -103,7 +84,8 @@ def _chat_ask(
     """讲解模式：每条消息即时检索，基于片段流式回答"""
     session = load_session(uid, body.session_id, "ask")
 
-    messages, results = chain.build_ask(body.message, session["messages"])
+    # 个人知识库：检索全局块 + 本人个人块
+    messages, results = chain.build_ask(body.message, session["messages"], uid=uid)
 
     # 先把引用来源推给前端（片段对应的知识条目），再开始流式正文
     yield _sse(
@@ -150,7 +132,8 @@ def _chat_teach(
         session["messages"] = []
         topic = (body.topic or msg).strip()
         # 检索参考答案：藏进系统提示当「标准答案」，不直接展示给用户
-        results = chain.retriever.search(topic, top_k=5)
+        # 个人知识库：费曼选题同样能选到本人的个人知识
+        results = chain.retriever.search(topic, top_k=5, uid=uid)
         meta.update({"topic": topic, "reference": format_context(results), "rounds": 0})
         save_session(uid, body.session_id, "teach", session)
 
@@ -281,7 +264,8 @@ def chat(body: ChatRequest, user: UserModel = Depends(get_current_user)):
         # 流式响应不能用 Depends(get_db)：
         # 端点函数返回时依赖就会关闭，而流才刚开始。改为手动管理会话。
         db = SessionLocal()
-        llm = _build_llm_for_user(db, uid)
+        # 用户私有模型配置优先；未配置回退服务端默认模型（对话不挂）
+        llm = build_llm_for_user(db, uid) or ChatLLM()
         try:
             chain = ChainBuilder(db)
             if body.mode == "ask":

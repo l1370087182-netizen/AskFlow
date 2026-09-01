@@ -1,14 +1,16 @@
 """Milvus 集合封装：建 collection、insert、search、count、delete。
 
-collection 结构（对应 CLAUDE.md §7.2）：
+collection 结构（对应 CLAUDE.md §7.2 + 个人知识库扩展）：
     id           INT64        主键（auto_id）
     vector       FLOAT_VECTOR bge-m3 向量（1024 维）
     knowledge_id INT64        来源知识主键（MySQL knowledge.id）
     content      VARCHAR      块文本
     category     VARCHAR      技术分类（检索时可按类过滤）
+    user_id      INT64        所属用户；0=全局知识（检索时按人隔离）
 """
 from __future__ import annotations
 
+import logging
 import threading
 
 from pymilvus import DataType, MilvusClient
@@ -16,6 +18,8 @@ from pymilvus import DataType, MilvusClient
 from core.config import settings
 
 from .spliter import Chunk
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -37,11 +41,30 @@ class VectorStore:
 
     # ---------- 集合管理 ----------
 
+    def _collection_fields(self) -> set[str]:
+        """现有集合的字段名集合；集合不存在返回空集"""
+        desc = self.client.describe_collection(self.COLLECTION)
+        return {f["name"] for f in desc.get("fields", [])}
+
     def _ensure_collection(self) -> None:
-        """集合不存在则创建（含向量索引），并确保已 load 进内存"""
+        """集合不存在则创建（含向量索引），并确保已 load 进内存。
+
+        存量集合缺 user_id 字段（个人知识库之前的旧 schema）→ drop 重建：
+        Milvus 不支持给已有集合安全地补主键/索引结构，直接重建最稳；
+        MySQL 侧 status 已在迁移时重置为 0，重跑 /api/embedding/run 即可回灌。
+        重建窗口期混合检索自动降级为纯 BM25，对话不整体失败。
+        """
         if self.client.has_collection(self.COLLECTION):
-            self.client.load_collection(self.COLLECTION)
-            return
+            if "user_id" not in self._collection_fields():
+                logger.warning(
+                    "[vectorstore] 存量集合 %s 缺 user_id 字段，drop 重建；"
+                    "请重跑 /api/embedding/run 回灌全部知识",
+                    self.COLLECTION,
+                )
+                self.client.drop_collection(self.COLLECTION)
+            else:
+                self.client.load_collection(self.COLLECTION)
+                return
 
         schema = self.client.create_schema(auto_id=True, enable_dynamic_field=False)
         schema.add_field("id", DataType.INT64, is_primary=True, description="块主键")
@@ -50,6 +73,7 @@ class VectorStore:
         # 块最长约 500 字（中文 UTF-8 约 1500 字节），4096 足够宽裕
         schema.add_field("content", DataType.VARCHAR, max_length=4096, description="块文本")
         schema.add_field("category", DataType.VARCHAR, max_length=128, description="技术分类")
+        schema.add_field("user_id", DataType.INT64, description="所属用户；0=全局知识")
 
         index_params = self.client.prepare_index_params()
         index_params.add_index(
@@ -78,6 +102,7 @@ class VectorStore:
                 "knowledge_id": c.knowledge_id,
                 "content": c.text,
                 "category": c.category,
+                "user_id": c.user_id,
                 "vector": v,
             }
             for c, v in zip(chunks, vectors)
@@ -122,16 +147,29 @@ class VectorStore:
         query_vector: list[float],
         top_k: int = 5,
         category: str | None = None,
+        uid: int = 0,
     ) -> list[dict]:
         """向量检索（阶段 6 的 retriever.py 会用到，这里先备好）
 
+        归属过滤（个人知识库）：uid=0 只看全局块（user_id == 0）；
+        uid>0 看全局 + 本人块（user_id == 0 or user_id == uid）。
+        与 category 条件用 and 拼接。
+
         :return: [{"score", "knowledge_id", "content", "category"}, ...] 按相似度降序
         """
+        parts: list[str] = []
+        if category:
+            parts.append(f'category == "{category}"')
+        if uid:
+            parts.append(f"(user_id == 0 or user_id == {int(uid)})")
+        else:
+            parts.append("user_id == 0")
+
         res = self.client.search(
             collection_name=self.COLLECTION,
             data=[query_vector],
             limit=top_k,
-            filter=f'category == "{category}"' if category else "",
+            filter=" and ".join(parts),
             output_fields=["knowledge_id", "content", "category"],
         )
         return [

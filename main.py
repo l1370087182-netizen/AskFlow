@@ -51,6 +51,11 @@ def create_app():
         user_router,
     ):
         app.include_router(r, dependencies=_auth)
+
+    # 个人知识库：幂等拉起爬取任务后台消费线程（模块级标记，daemon=True）。
+    # 注意：勿在 uvicorn --reload 下使用爬取功能（多进程会重复消费）
+    from service.knowledge_service import start_crawl_worker
+    start_crawl_worker()
     return app
 
 

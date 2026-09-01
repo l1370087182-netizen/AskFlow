@@ -28,6 +28,7 @@ class Chunk:
     category: str
     index: int  # 块在文档内的序号（0 起）
     text: str
+    user_id: int = 0  # 所属用户；0=全局知识（随块写入 Milvus，检索时按人过滤）
 
 
 def split_text(
@@ -97,6 +98,8 @@ def split_knowledge(
 ) -> list[Chunk]:
     """把一条 knowledge 记录切成 Chunk 列表（每块携带文档元信息）"""
     texts = split_text(row.content, chunk_size=chunk_size, overlap=overlap)
+    # 归属随块下沉：存量行/脏数据兜底为全局（0）
+    uid = getattr(row, "user_id", 0) or 0
     return [
         Chunk(
             knowledge_id=row.id,
@@ -105,6 +108,7 @@ def split_knowledge(
             category=row.category,
             index=i,
             text=t,
+            user_id=uid,
         )
         for i, t in enumerate(texts)
     ]

@@ -45,12 +45,14 @@ class ChainBuilder:
         message: str,
         history: list[dict],
         top_k: int = 5,
+        uid: int = 0,
     ) -> tuple[list[dict], list[dict]]:
         """组装讲解模式 messages：即时检索当前问题
 
+        :param uid: 请求者用户；检索时全局块+本人个人块可见（个人知识库）
         :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源
         """
-        results = self.retriever.search(message, top_k=top_k)
+        results = self.retriever.search(message, top_k=top_k, uid=uid)
         system = ASK_SYSTEM_PROMPT.format(context=format_context(results))
         messages = (
             [{"role": "system", "content": system}]

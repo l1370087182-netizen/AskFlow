@@ -25,16 +25,50 @@
       <p id="kb-sub">按分类浏览已入库的技术知识</p>
     </section>
 
-    <div id="kb-state" class="state-box">正在加载分类…</div>
-    <div id="kb-grid" class="kb-grid" style="display:none"></div>
+    <!-- 全局 / 我的 切换（复用对话页胶囊样式） -->
+    <div class="kb-tabs mode-switch" id="kb-tabs">
+      <button id="tab-global" class="active" type="button">全局知识库</button>
+      <button id="tab-mine" type="button">我的知识</button>
+    </div>
 
-    <section id="kb-list-wrap" style="display:none">
-      <div class="kb-list-head">
-        <h2 id="kb-list-title"></h2>
-        <span id="kb-list-count" class="rounds"></span>
+    <!-- ========== 全局知识库 ========== -->
+    <div id="pane-global">
+      <div id="kb-state" class="state-box">正在加载分类…</div>
+      <div id="kb-grid" class="kb-grid" style="display:none"></div>
+
+      <section id="kb-list-wrap" style="display:none">
+        <div class="kb-list-head">
+          <h2 id="kb-list-title"></h2>
+          <span id="kb-list-count" class="rounds"></span>
+        </div>
+        <div id="kb-list" class="kb-list"></div>
+      </section>
+    </div>
+
+    <!-- ========== 我的知识（个人知识库） ========== -->
+    <div id="pane-mine" style="display:none">
+      <div class="my-toolbar">
+        <button id="btn-add" class="btn btn-ghost" type="button">＋ 手工添加</button>
+        <button id="btn-crawl" class="btn btn-ghost" type="button">🕷 爬取整站</button>
+        <span id="my-count" class="row-meta"></span>
       </div>
-      <div id="kb-list" class="kb-list"></div>
-    </section>
+
+      <div id="my-state" class="state-box" style="display:none"></div>
+      <div id="my-list" class="kb-list"></div>
+
+      <!-- 爬取进度面板 -->
+      <div id="crawl-panel" class="crawl-panel" style="display:none">
+        <div class="crawl-head">
+          <b>爬取进度</b>
+          <span id="crawl-badge" class="badge">等待中</span>
+          <button id="crawl-panel-close" class="modal-close" title="收起" type="button">✕</button>
+        </div>
+        <div class="progress"><div id="crawl-bar" class="progress-bar" style="width:0%"></div></div>
+        <div id="crawl-current" class="row-meta"></div>
+        <div id="crawl-pages" class="crawl-pages"></div>
+        <div id="crawl-summary" class="crawl-summary"></div>
+      </div>
+    </div>
   </main>
 
   <!-- 知识详情弹窗 -->
@@ -46,6 +80,45 @@
       </div>
       <div id="modal-meta" class="modal-meta"></div>
       <div id="modal-body" class="modal-body rich"></div>
+    </div>
+  </div>
+
+  <!-- 手工添加 / 编辑弹窗 -->
+  <div id="edit-modal" class="modal-mask" style="display:none">
+    <div class="modal small">
+      <div class="modal-head">
+        <h3 id="edit-modal-title">添加知识</h3>
+        <button id="edit-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div class="set-tip" id="edit-tip">正文至少 50 字；保存后立即向量化，随即可在对话中检索。手工添加不做 AI 清洗。</div>
+      <label class="set-row"><span>标题</span><input id="edit-title" maxlength="512" placeholder="知识标题"></label>
+      <label class="set-row"><span>分类</span><input id="edit-category" maxlength="128" placeholder="如 fastapi / python / ai"></label>
+      <div class="set-row"><span>正文</span><textarea id="edit-content" rows="12" placeholder="知识正文内容…"></textarea></div>
+      <div class="set-actions">
+        <button id="edit-save" class="btn btn-primary" type="button">保存</button>
+        <span id="edit-msg" class="auth-msg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 爬取整站弹窗 -->
+  <div id="crawl-modal" class="modal-mask" style="display:none">
+    <div class="modal small">
+      <div class="modal-head">
+        <h3>爬取整站</h3>
+        <button id="crawl-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div class="set-tip">
+        提交种子 URL 后，后台抓取目标页与同域链接（默认 10 页，最多 20 页），
+        用你 <a href="chat.html">⚙️ 已保存的模型</a> 做 AI 清洗后存入个人知识库，仅你本人可见。
+      </div>
+      <label class="set-row"><span>URL</span><input id="crawl-url" placeholder="https://example.com/docs/"></label>
+      <label class="set-row"><span>分类</span><input id="crawl-category" maxlength="128" placeholder="如 fastapi / ai"></label>
+      <label class="set-row"><span>页数</span><input id="crawl-max-pages" type="number" min="1" max="20" value="10"></label>
+      <div class="set-actions">
+        <button id="crawl-submit" class="btn btn-primary" type="button">提交爬取</button>
+        <span id="crawl-msg" class="auth-msg"></span>
+      </div>
     </div>
   </div>
 

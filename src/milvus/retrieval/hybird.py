@@ -80,15 +80,21 @@ class HybridRetriever:
         query: str,
         top_k: int = 5,
         category: str | None = None,
+        uid: int = 0,
     ) -> list[dict]:
         """完整检索链路，返回精排后的最终结果
 
+        :param uid: 请求者用户；个人知识仅本人可检索（全局块所有人可见）
         :return: [{knowledge_id, content, category, score, rrf_score, matched_by, source}, ...]
         """
         # 1) 双路召回（向量路不可用时降级为单路，不让整个对话挂掉）
-        bm25_hits = self.bm25.search(query, top_k=self.bm25_top, category=category)
+        bm25_hits = self.bm25.search(
+            query, top_k=self.bm25_top, category=category, uid=uid
+        )
         try:
-            vec_hits = self.vector.search(query, top_k=self.vector_top, category=category)
+            vec_hits = self.vector.search(
+                query, top_k=self.vector_top, category=category, uid=uid
+            )
         except Exception as e:  # noqa: BLE001 —— Milvus/Milvus Lite 不可用时保底
             logger.warning("[retrieval] 向量路不可用，降级为纯 BM25：%s", e)
             vec_hits = []

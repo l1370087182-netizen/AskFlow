@@ -7,10 +7,16 @@
 
 幂等性：写入前先按 knowledge_id 清旧块，
 所以文档内容更新（upsert 重置 status=0）后重跑不会产生重复块。
+
+并发安全（个人知识库）：个人条目走 ingest_row 即时入库，与批量流水线
+可能同时发生。「清旧块→写新块」这对操作必须原子，否则会出现
+A 清完旧块、B 也清/写、交错出孤儿块。用进程级写锁串行化该窗口；
+批量流水线与即时入库共享同一把锁。
 """
 from __future__ import annotations
 
 import logging
+import threading
 
 from sqlalchemy.orm import Session
 
@@ -22,6 +28,9 @@ from .spliter import split_knowledge
 from .VectorStore import VectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
+
+# 进程级写锁：串行化「清旧块→写新块」窗口（批量流水线 + 即时入库共用）
+_ingest_lock = threading.Lock()
 
 
 class IngestionPipeline:
@@ -69,15 +78,39 @@ class IngestionPipeline:
         logger.info("[ingestion] 本轮完成：%s", stats)
         return stats
 
+    def ingest_row(self, row: KnowledgeModel) -> int:
+        """单条即时入库（个人知识手工添加/爬取/编辑后用），返回写入块数。
+
+        成功回写 status=1；任何一步异常回写 status=2 并上抛，
+        由调用方决定如何向前端呈现（条目已保存，但向量化失败）。
+        """
+        try:
+            n = self._ingest_one(row)
+            self.dao.update_status(row.id, KnowledgeModel.STATUS_EMBEDDED)
+            logger.info(
+                "[ingestion] id=%s《%s》即时入库 %s 块", row.id, row.title, n
+            )
+            return n
+        except Exception:
+            self.dao.update_status(row.id, KnowledgeModel.STATUS_FAILED)
+            logger.exception(
+                "[ingestion] id=%s《%s》即时向量化失败", row.id, row.title
+            )
+            raise
+
     def _ingest_one(self, row: KnowledgeModel) -> int:
-        """单篇文档：清旧块 → 切块 → 向量化 → 写 Milvus，返回写入块数"""
-        # 先清旧块（重跑/内容更新场景），保证幂等
-        self.store.delete_by_knowledge(row.id)
+        """单篇文档：清旧块 → 切块 → 向量化 → 写 Milvus，返回写入块数
 
-        chunks = split_knowledge(row)
-        if not chunks:
-            logger.warning("[ingestion] id=%s《%s》内容为空，无块可写", row.id, row.title)
-            return 0
+        「清旧块→写新块」整体在进程级写锁内，避免与并发入库交错。
+        """
+        with _ingest_lock:
+            # 先清旧块（重跑/内容更新场景），保证幂等
+            self.store.delete_by_knowledge(row.id)
 
-        vectors = self.embedder.embed_texts([c.text for c in chunks])
-        return self.store.insert_chunks(chunks, vectors)
+            chunks = split_knowledge(row)
+            if not chunks:
+                logger.warning("[ingestion] id=%s《%s》内容为空，无块可写", row.id, row.title)
+                return 0
+
+            vectors = self.embedder.embed_texts([c.text for c in chunks])
+            return self.store.insert_chunks(chunks, vectors)

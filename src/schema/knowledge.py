@@ -5,6 +5,7 @@ from datetime import datetime
 class KnowledgeItem(BaseModel):
     """单条知识的响应模型"""
     id: int
+    user_id: int = Field(default=0, description="所属用户；0=全局知识")
     title: str
     source_url: str
     category: str
@@ -12,7 +13,7 @@ class KnowledgeItem(BaseModel):
     status: int = Field(..., description="0=待向量化，1=已向量化，2=向量化失败")
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    
+
     model_config = {
         "from_attributes": True,
     }
@@ -24,7 +25,7 @@ class KnowledgeListResponse(BaseModel):
     items: list[KnowledgeItem]
 
 class KnowledgeCreateRequest(BaseModel):
-    """手动创建知识的请求模型"""
+    """手动创建知识的请求模型（全局语料）"""
 
     title: str = Field(..., min_length=1, max_length=512)
     content: str = Field(..., min_length=1)
@@ -39,3 +40,57 @@ class KnowledgeDetailResponse(KnowledgeItem):
     content: str
 
 
+# ---------- 个人知识库（我的知识） ----------
+
+class KnowledgeMyCreateRequest(BaseModel):
+    """手工添加个人知识：title 1..512；content 有效长度 ≥50 字（控制器校验，400）"""
+
+    title: str = Field(..., min_length=1, max_length=512)
+    content: str = Field(..., min_length=1)
+    category: str = Field(default="general", max_length=128)
+
+
+class KnowledgeMyUpdateRequest(BaseModel):
+    """编辑个人知识：至少传一项（控制器校验，全空 400）"""
+
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    content: str | None = Field(default=None, min_length=1)
+    category: str | None = Field(default=None, max_length=128)
+
+
+class KnowledgeCrawlRequest(BaseModel):
+    """提交整站浅爬任务：种子 URL + 分类 + 页数（钳制 1..20，默认 10）"""
+
+    url: str = Field(..., min_length=1, max_length=768)
+    category: str = Field(default="general", max_length=128)
+    max_pages: int = Field(default=10, ge=1, le=20)
+
+
+class CrawlPageOut(BaseModel):
+    """任务内单页结果"""
+
+    url: str
+    ok: bool
+    cleaned: bool = False
+    knowledge_id: int | None = None
+    error: str = ""
+
+
+class CrawlTaskOut(BaseModel):
+    """爬取任务进度响应（Redis 状态整体覆写）"""
+
+    task_id: str
+    uid: int
+    url: str
+    category: str
+    max_pages: int
+    status: str = Field(..., description="pending|running|done|partial|failed")
+    done_pages: int = 0
+    failed_pages: int = 0
+    skipped_pages: int = 0
+    current_url: str = ""
+    pages: list[CrawlPageOut] = []
+    error: str = ""
+    heartbeat: float = 0.0
+    created_at: float = 0.0
+    finished_at: float = 0.0

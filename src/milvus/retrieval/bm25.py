@@ -27,8 +27,8 @@ from model.KnowledgeModel import KnowledgeModel
 
 logger = logging.getLogger(__name__)
 
-# 缓存文件名
-CACHE_NAME = "bm25_cache.pkl"
+# 缓存文件名（v2：块数据新增 user_id 归属字段，升版避免命中旧结构缓存）
+CACHE_NAME = "bm25_cache_v2.pkl"
 
 
 def tokenize(text: str) -> list[str]:
@@ -54,7 +54,8 @@ class BM25Retriever:
     def __init__(self, db: Session, cache_path: Path | None = None):
         self.db = db
         self.cache_path = cache_path or Path(settings.DATA_DIR) / CACHE_NAME
-        self.docs: list[dict] = []  # [{"knowledge_id","content","category"}, ...]
+        # [{"knowledge_id","content","category","user_id"}, ...]
+        self.docs: list[dict] = []
         self.bm25: BM25Okapi | None = None
         self._ensure_ready()
 
@@ -97,7 +98,10 @@ class BM25Retriever:
             return None
 
     def _rebuild(self, sig: CacheSignature) -> None:
-        """全量重建：拉 status=1 知识 → 同一套切块 → 落盘"""
+        """全量重建：拉 status=1 知识（全局+全部个人）→ 同一套切块 → 落盘
+
+        个人块也进语料，归属随块携带（user_id），检索时按请求者过滤。
+        """
         rows = (
             self.db.query(KnowledgeModel)
             .filter(KnowledgeModel.status == KnowledgeModel.STATUS_EMBEDDED)
@@ -112,6 +116,7 @@ class BM25Retriever:
                         "knowledge_id": chunk.knowledge_id,
                         "content": chunk.text,
                         "category": chunk.category,
+                        "user_id": chunk.user_id,
                     }
                 )
         self.docs = docs
@@ -130,8 +135,12 @@ class BM25Retriever:
         query: str,
         top_k: int = 20,
         category: str | None = None,
+        uid: int = 0,
     ) -> list[dict]:
         """BM25 检索，返回按分数降序的块列表
+
+        归属过滤（个人知识库）：只保留全局块（user_id=0）与请求者本人的块，
+        与 category 同样写法——不符合的分数置 -1，排序后自然被截掉。
 
         :return: [{"knowledge_id","content","category","score","source":"bm25"}, ...]
         """
@@ -139,6 +148,12 @@ class BM25Retriever:
             return []
 
         scores = self.bm25.get_scores(tokenize(query))
+
+        # 归属过滤：他人个人块不可见
+        scores = [
+            s if d["user_id"] in (0, uid) else -1.0
+            for s, d in zip(scores, self.docs)
+        ]
 
         # category 过滤：不符合的分数置 -1，排到最后自然被截掉
         if category:

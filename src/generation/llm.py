@@ -158,3 +158,31 @@ class ChatLLM:
             ) as stream:
                 for text in stream.text_stream:
                     yield text
+
+
+# ---------- 用户私有模型配置 → ChatLLM ----------
+
+def build_llm_for_user(db, uid: int) -> ChatLLM | None:
+    """按用户私有模型配置（user.llm_*）构造 ChatLLM。
+
+    未配置（base_url/api_key 任一为空）返回 None，由调用方决定语义：
+    - 对话链路：`build_llm_for_user(...) or ChatLLM()` 回退服务端默认模型；
+    - 个人知识爬取清洗：直接失败（清洗必须用用户自己的模型，
+      提交端点会在入口处 400 提示去 ⚙️ 配置）。
+    """
+    from DAO.user_dao import UserDAO  # 延迟导入，避免模块级循环依赖
+
+    cfg = UserDAO(db).get_llm_config(uid)
+    if not (cfg["base_url"].strip() and cfg["api_key"].strip()):
+        return None
+    provider = cfg["provider"] or "auto"
+    model = cfg["model"].strip()
+    if not model:
+        resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
+        model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
+    return ChatLLM(
+        provider=provider,
+        base_url=cfg["base_url"].strip(),
+        api_key=cfg["api_key"].strip(),
+        model=model,
+    )

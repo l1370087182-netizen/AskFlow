@@ -26,11 +26,13 @@ class VectorRetriever:
         query: str,
         top_k: int = 20,
         category: str | None = None,
+        uid: int = 0,
     ) -> list[dict]:
         """向量检索，返回按余弦相似度降序的块列表
 
+        :param uid: 请求者用户；0=只看全局块，>0=全局+本人块（个人知识库隔离）
         :return: [{"knowledge_id","content","category","score","source":"vector"}, ...]
         """
         qvec = self.embedder.embed_texts([query])[0]
-        hits = self.store.search(qvec, top_k=top_k, category=category)
+        hits = self.store.search(qvec, top_k=top_k, category=category, uid=uid)
         return [{**h, "source": "vector"} for h in hits]

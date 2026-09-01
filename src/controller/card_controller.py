@@ -65,7 +65,10 @@ def _to_card(term: TechTermModel, date_str: str) -> dict:
 
 @router.get("/overview")
 def overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """系统概览统计：知识条目 / 术语卡片（全局）+ 讲解评估（当前用户）"""
+    """系统概览统计：知识条目 / 术语卡片（全局）+ 讲解评估（当前用户）
+
+    个人知识库：全局计数只算 user_id=0，另返回本人已向量化个人条目数。
+    """
     from sqlalchemy import func as sa_func
 
     from model.KnowledgeModel import KnowledgeModel
@@ -74,13 +77,26 @@ def overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
 
     knowledge = (
         db.query(sa_func.count(KnowledgeModel.id))
-        .filter(KnowledgeModel.status == KnowledgeModel.STATUS_EMBEDDED)
+        .filter(
+            KnowledgeModel.status == KnowledgeModel.STATUS_EMBEDDED,
+            KnowledgeModel.user_id == 0,
+        )
+        .scalar()
+        or 0
+    )
+    my_knowledge = (
+        db.query(sa_func.count(KnowledgeModel.id))
+        .filter(
+            KnowledgeModel.status == KnowledgeModel.STATUS_EMBEDDED,
+            KnowledgeModel.user_id == user.id,
+        )
         .scalar()
         or 0
     )
     eval_stats = EvaluateDAO(db).stats(user.id)
     return {
         "knowledge": knowledge,
+        "my_knowledge": my_knowledge,
         "terms": TechTermDAO(db).count(),
         "evals": eval_stats["total"],
         "eval_avg_score": eval_stats["avg_score"],
