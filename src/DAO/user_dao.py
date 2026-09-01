@@ -1,4 +1,6 @@
 """user 表的 DAO：账号增查、改密、私有模型配置读写。"""
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from auth.security import decrypt_secret, encrypt_secret
@@ -40,6 +42,18 @@ class UserDAO:
         row.password_hash = password_hash
         row.token_ver = (row.token_ver or 0) + 1
         self.db.commit()
+
+    def touch_last_login(self, user_id: int) -> None:
+        """刷新最近登录时间（登录成功时调用；注册即首次登录也写）"""
+        row = self.get_by_id(user_id)
+        if not row:
+            return
+        row.last_login_at = datetime.now()
+        self.db.commit()
+
+    def list_all(self) -> list[UserModel]:
+        """全部注册用户，按 id 升序（管理员后台用）"""
+        return self.db.query(UserModel).order_by(UserModel.id).all()
 
     # ---------- 私有模型配置 ----------
 

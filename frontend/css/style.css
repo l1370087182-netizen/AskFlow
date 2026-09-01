@@ -530,3 +530,23 @@ a { color: var(--brand); text-decoration: none; }
   background: var(--bg); outline: none;
 }
 .ai-input-row input:focus { border-color: var(--brand); background: #fff; }
+
+/* ---------- 管理后台：用户总览表 ---------- */
+.admin-table {
+  width: 100%; border-collapse: collapse;
+  background: var(--card); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+  font-size: 13.5px;
+}
+.admin-table th, .admin-table td {
+  padding: 11px 18px; text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.admin-table thead th {
+  background: var(--brand-soft); color: var(--ink);
+  font-size: 13px; white-space: nowrap;
+}
+.admin-table tbody tr:last-child td { border-bottom: none; }
+.admin-table tbody tr:hover { background: var(--bg); }
+.admin-table .cell-email { font-weight: 600; color: var(--ink); }
+.admin-table .cell-dim { color: var(--ink-3); white-space: nowrap; }

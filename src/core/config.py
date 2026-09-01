@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     AUTH_PBKDF2_ITERATIONS: int = Field(default=200_000, description="密码哈希迭代次数")
     FERNET_KEY: str = Field(default="", description="api_key 加密密钥，留空则由 AUTH_SECRET_KEY 派生")
 
+        # ---------- 管理员（固定凭证，只在这里改，不进数据库） ----------
+    ADMIN_USERNAME: str = Field(default="adminljj", description="管理员账号；在登录页直接输入即可登录")
+    ADMIN_PASSWORD: str = Field(default="", description="管理员密码；留空=禁用管理员登录")
+
         # ---------- 验证码邮件（SMTP 未配置时验证码只打印到后端日志，便于本地开发）----------
     SMTP_HOST: str = Field(default="", description="SMTP 服务器，如 smtp.qq.com")
     SMTP_PORT: int = Field(default=465, description="SMTP 端口，SSL 一般 465")

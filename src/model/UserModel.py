@@ -50,6 +50,10 @@ class UserModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now, comment="创建时间"
     )
+    # 注册时即写入（注册=首次登录）；管理员后台展示「最近登录时间」
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None, comment="最近登录时间"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now, onupdate=datetime.now,
         comment="更新时间",

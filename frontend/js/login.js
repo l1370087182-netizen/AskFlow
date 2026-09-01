@@ -8,8 +8,10 @@ const forms = {
   reset: document.getElementById('form-reset'),
 };
 
-// 已登录则直接进首页
-if (getToken()) location.replace('index.html');
+// 已登录则直接进首页（管理员进后台）
+if (getToken()) {
+  location.replace(localStorage.getItem('rag_role') === 'admin' ? 'admin.html' : 'index.html');
+}
 
 function showMsg(text, ok = false) {
   msg.textContent = text || '';
@@ -23,8 +25,12 @@ function switchTab(name) {
 }
 tabs.forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
-// 登录成功后回跳：优先 URL 的 next 参数
-function redirectAfterAuth() {
+// 登录成功后回跳：管理员 → 后台；普通用户优先 URL 的 next 参数
+function redirectAfterAuth(role) {
+  if (role === 'admin') {
+    location.replace('admin.html');
+    return;
+  }
   const params = new URLSearchParams(location.search);
   const next = params.get('next');
   location.replace(next && next.startsWith('/') ? '.' + next : 'index.html');
@@ -32,6 +38,9 @@ function redirectAfterAuth() {
 
 function storeToken(data) {
   localStorage.setItem('rag_token', data.token);
+  // 角色标记：管理员登录后跳后台页，普通用户回业务页
+  if (data.role === 'admin') localStorage.setItem('rag_role', 'admin');
+  else localStorage.removeItem('rag_role');
 }
 
 // ---------- 验证码倒计时（两个发送按钮共用逻辑）----------
@@ -81,7 +90,7 @@ forms.login.addEventListener('submit', async (e) => {
       password: document.getElementById('li-password').value,
     });
     storeToken(data);
-    redirectAfterAuth();
+    redirectAfterAuth(data.role);
   } catch (err) {
     showMsg(err.message);
   }

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理后台 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统 · 管理后台</div>
+      <div class="topbar-user">
+        <span class="tu-email">🛡️ 管理员</span>
+        <button id="admin-logout" class="tu-logout" type="button">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="home-hero">
+      <h1>注册用户</h1>
+      <p id="admin-sub">正在加载…</p>
+    </section>
+
+    <div id="admin-state" class="state-box" style="display:none"></div>
+
+    <table id="admin-table" class="admin-table" style="display:none">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>邮箱</th>
+          <th>注册时间</th>
+          <th>最近登录</th>
+        </tr>
+      </thead>
+      <tbody id="admin-rows"></tbody>
+    </table>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

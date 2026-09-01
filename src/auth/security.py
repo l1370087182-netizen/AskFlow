@@ -58,11 +58,13 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ---------- JWT ----------
 
-def create_access_token(user_id: int, token_ver: int) -> str:
+def create_access_token(user_id: int, token_ver: int, role: str = "user") -> str:
+    """签发 JWT；role=user 普通用户 / role=admin 管理员（凭证在 .env，不进数据库）"""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "ver": token_ver,
+        "role": role,
         "iat": int(now.timestamp()),
         "exp": now + timedelta(minutes=settings.AUTH_TOKEN_TTL_MIN),
     }

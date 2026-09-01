@@ -3,6 +3,7 @@
 邮箱用自写正则校验（不引 email-validator 依赖）。
 """
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -45,13 +46,14 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str = Field(..., min_length=1, max_length=64)
+    """登录：邮箱或管理员账号（.env 的 ADMIN_USERNAME）+ 密码。
 
-    @field_validator("email")
-    @classmethod
-    def _email(cls, v: str) -> str:
-        return _check_email(v)
+    管理员账号不是邮箱，所以这里不做邮箱格式校验，只做长度限制；
+    注册/重置密码仍然严格要求邮箱格式。
+    """
+
+    email: str = Field(..., min_length=1, max_length=255, description="邮箱或管理员账号")
+    password: str = Field(..., min_length=1, max_length=64)
 
 
 class ResetRequest(BaseModel):
@@ -78,6 +80,24 @@ class UserOut(BaseModel):
 class TokenResponse(BaseModel):
     token: str
     user: UserOut
+    role: str = "user"  # user=普通用户 / admin=管理员（前端据此跳管理后台）
+
+
+class AdminUserOut(BaseModel):
+    """管理员后台的用户行：邮箱 + 注册时间 + 最近登录时间"""
+
+    id: int
+    email: str
+    nickname: str
+    created_at: datetime | None = None
+    last_login_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminUsersResponse(BaseModel):
+    total: int
+    users: list[AdminUserOut]
 
 
 class LLMConfigOut(BaseModel):

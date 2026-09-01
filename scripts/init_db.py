@@ -100,6 +100,11 @@ def main() -> None:
     with engine.connect() as conn:
         ensure_column(conn, "evaluate", "user_id", "user_id INT NULL COMMENT '所属用户'")
         ensure_column(conn, "jd", "user_id", "user_id INT NULL COMMENT '所属用户'")
+        # 管理员后台展示「最近登录时间」（存量用户为 NULL = 功能上线前注册）
+        ensure_column(
+            conn, "user", "last_login_at",
+            "last_login_at DATETIME NULL COMMENT '最近登录时间'",
+        )
 
     # 个人知识库迁移（幂等）：
     # 1) knowledge 补 user_id（NOT NULL DEFAULT 0，存量行自动落 0=全局）
