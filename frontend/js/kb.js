@@ -114,7 +114,7 @@ async function openDetail(id) {
     `<span class="category-tag">${categoryLabel(d.category)}</span>` +
     `<span class="row-meta">${sourceLabel(d.source_type)} · ` +
     (d.created_at ? d.created_at.slice(0, 10) : '') + '</span>' + link;
-  document.getElementById('modal-body').innerHTML = renderRich(d.content);
+  document.getElementById('modal-body').innerHTML = renderKnowledge(d.content);
   document.getElementById('kb-modal').style.display = '';
 }
 

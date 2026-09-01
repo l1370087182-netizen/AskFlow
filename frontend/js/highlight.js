@@ -144,3 +144,115 @@ function renderRich(text) {
   }
   return html;
 }
+
+// ---------- 知识正文渲染：纯文本中启发式识别代码块 ----------
+// 知识库正文是网页提取的纯文本（无 markdown 围栏），代码与文字混排。
+// 思路：逐行打「代码似度」分 → 连续代码行成块 → 代码块高亮、其余走 markdown。
+
+// 单行代码似度：3=强信号（可独立成块），2=较弱（需成组），0=散文
+function kbCodeLineScore(line) {
+  const t = line.trim();
+  if (!t) return 0;
+  // Python REPL 提示符
+  if (/^(>>>|\.\.\.)(\s|$)/.test(t)) return 3;
+  // shell 命令（$ 前缀或常见包管理/工具命令）
+  if (/^\$\s+\S/.test(t)) return 3;
+  // 注：白名单只收「后随参数也不像英文句子」的命令，避免把 "make sure..." 这类散文判成代码
+  if (/^(pip3?|python3?|uv|uvicorn|gunicorn|git|curl|wget|npm|yarn|docker|kubectl|apt|apt-get|yum|poetry|pipx|pytest|flask)\s+[\w./:=@-]+/.test(t)) return 3;
+  // Python 结构性行
+  if (/^(async\s+def|def|class)\s+[A-Za-z_][\w.]*/.test(t)) return 3;
+  if (/^(import|from)\s+[A-Za-z_][\w.]*/.test(t)) return 3;
+  if (/^@[A-Za-z_][\w.]*/.test(t)) return 3;
+  // 字典/列表字面量行（JSON 示例等）
+  if (/^[{[]/.test(t) && /[}\]]\s*,?\s*$/.test(t)) return 2;
+  // 关键字起始行
+  if (/^(if|elif|else|for|while|try|except|finally|with|return|raise|yield|assert|pass|break|continue|global|nonlocal|del|lambda)\b/.test(t)) return 2;
+  // 赋值：identifier = value（排除 URL 行）
+  if (/^[A-Za-z_][\w.\[\]'"-]*\s*[+\-*/%&|^]?=\s*\S/.test(t) && !/^https?:\/\//.test(t)) return 2;
+  // 行尾花括号/分号（C/JS/Java 风格）
+  if (/[{\[]\s*$/.test(t) || /^\s*[}\])][;,]?\s*$/.test(t)) return 2;
+  return 0;
+}
+
+// 零分但形似上一行的延续（多行调用/参数列表的后半段）
+function kbIsContinuation(prevLine, cur) {
+  if (!prevLine || !cur) return false;
+  const p = prevLine.trim();
+  if (/[(\[,\\]$/.test(p) || /,\s*$/.test(p)) {
+    return /^[+\-*/%)]/.test(cur) || /^[\w).}'"\]]/.test(cur);
+  }
+  return /^[).,\]}]/.test(cur);
+}
+
+// 把纯文本切成 {code, text} 段
+function kbSplitBlocks(text) {
+  const lines = String(text).split('\n');
+  const n = lines.length;
+  const scores = lines.map(kbCodeLineScore);
+  const isCode = new Array(n).fill(false);
+
+  let i = 0;
+  while (i < n) {
+    const s = scores[i];
+    // 块起点：强信号行；或较弱行且下一非空行也有代码似度
+    let startable = s >= 3;
+    if (!startable && s === 2) {
+      let k = i + 1;
+      while (k < n && !lines[k].trim()) k++;
+      startable = k < n && (scores[k] >= 2 || kbIsContinuation(lines[i], lines[k].trim()));
+    }
+    if (!startable) { i++; continue; }
+
+    // 向后扩展块边界
+    let j = i + 1;
+    while (j < n) {
+      const t = lines[j].trim();
+      if (scores[j] >= 2) { j++; continue; }
+      if (!t) {
+        // 空行：后面两行内还有代码行才算块内空行，否则块结束
+        let k = j + 1;
+        while (k < n && !lines[k].trim()) k++;
+        if (k < n && scores[k] >= 2) { j = k; continue; }
+        break;
+      }
+      if (kbIsContinuation(lines[j - 1], t)) { j++; continue; }
+      break;
+    }
+    // 去掉块尾空行
+    while (j > i && !lines[j - 1].trim()) j--;
+
+    // 块有效性：弱起点需 ≥2 个非空行，且至少一行带代码符号（防把「return 语句」这类散文误判）
+    const blockLines = lines.slice(i, j).filter(l => l.trim());
+    const hasGlyph = blockLines.some(l => /[=(){}[\]:;]|^\s*[@$]/.test(l.trim()));
+    const valid = s >= 3 || (blockLines.length >= 2 && hasGlyph);
+    if (valid) {
+      for (let k = i; k < j; k++) isCode[k] = true;
+    }
+    i = valid ? j : i + 1;
+  }
+
+  // 按 isCode 归段
+  const segs = [];
+  let buf = [], inCode = false;
+  const flush = () => {
+    if (buf.length) segs.push({ code: inCode, text: buf.join('\n') });
+    buf = [];
+  };
+  for (let k = 0; k < n; k++) {
+    if (isCode[k] !== inCode) { flush(); inCode = isCode[k]; }
+    buf.push(lines[k]);
+  }
+  flush();
+  return segs;
+}
+
+// 知识详情正文渲染：带围栏的直接走 markdown；纯文本先做代码块识别
+function renderKnowledge(text) {
+  const src = String(text);
+  if (src.includes('```')) return renderRich(src);
+  return kbSplitBlocks(src)
+    .map(seg => seg.code
+      ? '<pre class="code-block"><code>' + highlightCode(seg.text.replace(/^\n+|\n+$/g, '')) + '</code></pre>'
+      : mdBlocks(seg.text))
+    .join('');
+}

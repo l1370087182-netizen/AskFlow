@@ -46,6 +46,13 @@ def parse_article(html: str, url: str) -> dict:
     if main:
         for tag in main.find_all(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
+        # 代码块保真：<pre>（含嵌套 <code>）转成 ``` 围栏文本再提取，
+        # 前端知识详情按围栏/启发式渲染时代码才有高亮排版。
+        # 正文自带 ``` 的极端情况跳过，避免围栏嵌套破坏渲染
+        for pre in main.find_all("pre"):
+            code_text = pre.get_text("\n").strip("\n")
+            if code_text and "```" not in code_text:
+                pre.replace_with(f"\n```\n{code_text}\n```\n")
         content = main.get_text("\n", strip=True)
     else:
         content = soup.get_text("\n", strip=True)
