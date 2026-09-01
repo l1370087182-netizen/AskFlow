@@ -30,18 +30,20 @@ const btnFinish = document.getElementById('btn-finish');
 const topicBar = document.getElementById('topic-bar');
 const hint = document.getElementById('hint');
 
-// ---------- 外部模型配置 ----------
+// ---------- 外部模型配置（阶段 11：存服务端，按用户隔离，不再用 localStorage）----------
 
-function getLLMConfig() {
+// 当前用户的模型配置快照（含 has_custom / api_key_masked），启动与保存后刷新
+let llmState = { has_custom: false, provider: 'auto', base_url: '', model: '', api_key_masked: '' };
+
+async function refreshLLMState() {
   try {
-    const c = JSON.parse(localStorage.getItem('rag_llm_config') || 'null');
-    if (c && c.base_url && c.api_key) return c;
-  } catch (e) { /* 配置损坏当没配 */ }
-  return null;
+    llmState = await apiGet('/api/user/llm');
+  } catch (e) { /* 401 已跳登录页；其余暂按默认模型展示 */ }
+  updateLLMBadge();
 }
 
 function updateLLMBadge() {
-  const cfg = getLLMConfig();
+  const cfg = llmState.has_custom ? llmState : null;
   const text = cfg
     ? ' ' + (cfg.model || (cfg.provider === 'anthropic' ? 'claude 默认' : '自定义模型'))
       + (cfg.provider !== 'auto' ? `（${cfg.provider}）` : '')
@@ -322,8 +324,7 @@ async function send(text, opts = {}) {
 
   const payload = { session_id: currentId, mode, message: text };
   if (opts.finish) payload.finish = true;
-  const cfg = getLLMConfig();
-  if (cfg) payload.llm = cfg;   // 用户自定义模型随请求透传
+  // 阶段 11：模型配置由后端按当前登录用户读取，不再随请求透传
 
   let curBubble = addAiBubble(opts.finish ? '评分中…' : '思考中…');
   let curText = '';
@@ -398,14 +399,22 @@ async function send(text, opts = {}) {
 
 const setModal = document.getElementById('set-modal');
 
-function openSettings() {
-  const c = JSON.parse(localStorage.getItem('rag_llm_config') || 'null') || {};
-  document.getElementById('set-provider').value = c.provider || 'auto';
-  document.getElementById('set-url').value = c.base_url || '';
-  document.getElementById('set-key').value = c.api_key || '';
-  document.getElementById('set-model').value = c.model || '';
-  document.getElementById('set-result').textContent = '';
-  setModal.style.display = '';
+async function openSettings() {
+  try {
+    const c = await apiGet('/api/user/llm');
+    llmState = c;
+    document.getElementById('set-provider').value = c.provider || 'auto';
+    document.getElementById('set-url').value = c.base_url || '';
+    document.getElementById('set-key').value = '';
+    document.getElementById('set-key').placeholder = c.api_key_masked
+      ? c.api_key_masked + '（留空保持不变）'
+      : 'API Key';
+    document.getElementById('set-model').value = c.model || '';
+    document.getElementById('set-result').textContent = '';
+    setModal.style.display = '';
+  } catch (e) {
+    alert('读取配置失败：' + e.message);
+  }
 }
 
 function readSettingsForm() {
@@ -421,25 +430,26 @@ document.getElementById('btn-settings').addEventListener('click', openSettings);
 document.getElementById('set-close').addEventListener('click', () => setModal.style.display = 'none');
 setModal.addEventListener('click', (e) => { if (e.target === setModal) setModal.style.display = 'none'; });
 
-document.getElementById('set-save').addEventListener('click', () => {
+document.getElementById('set-save').addEventListener('click', async () => {
   const cfg = readSettingsForm();
-  if (cfg.base_url && !cfg.api_key) {
-    document.getElementById('set-result').textContent = '填了地址就要填 API Key';
-    return;
+  const result = document.getElementById('set-result');
+  try {
+    llmState = await apiPutJson('/api/user/llm', cfg);
+    updateLLMBadge();
+    setModal.style.display = 'none';
+  } catch (e) {
+    result.textContent = e.message;
   }
-  if (cfg.base_url && cfg.api_key) {
-    localStorage.setItem('rag_llm_config', JSON.stringify(cfg));
-  } else {
-    localStorage.removeItem('rag_llm_config');  // 都空 = 用默认
-  }
-  updateLLMBadge();
-  setModal.style.display = 'none';
 });
 
-document.getElementById('set-clear').addEventListener('click', () => {
-  localStorage.removeItem('rag_llm_config');
-  updateLLMBadge();
-  setModal.style.display = 'none';
+document.getElementById('set-clear').addEventListener('click', async () => {
+  try {
+    llmState = await apiPutJson('/api/user/llm', { provider: 'auto', base_url: '', api_key: '', model: '' });
+    updateLLMBadge();
+    setModal.style.display = 'none';
+  } catch (e) {
+    alert('清除失败：' + e.message);
+  }
 });
 
 document.getElementById('set-test').addEventListener('click', async () => {
@@ -510,7 +520,7 @@ async function boot() {
 
   await refreshSessions();
   await loadHistory();
-  updateLLMBadge();
+  refreshLLMState();
 
   if (mode === 'ask' && q) {
     send(q);

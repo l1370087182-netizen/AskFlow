@@ -14,6 +14,7 @@ class EvaluateDAO:
     def create(
         self,
         *,
+        user_id: int,
         session_id: str,
         topic: str,
         rounds: int,
@@ -25,6 +26,7 @@ class EvaluateDAO:
         raw: str,
     ) -> EvaluateModel:
         row = EvaluateModel(
+            user_id=user_id,
             session_id=session_id,
             topic=topic,
             rounds=rounds,
@@ -40,30 +42,32 @@ class EvaluateDAO:
         self.db.refresh(row)
         return row
 
-    def get_by_id(self, evaluate_id: int) -> EvaluateModel | None:
+    def get_by_id(self, evaluate_id: int, user_id: int) -> EvaluateModel | None:
+        """按主键 + 属主查；越权查询（不是自己的记录）返回 None"""
         return (
             self.db.query(EvaluateModel)
-            .filter(EvaluateModel.id == evaluate_id)
+            .filter(EvaluateModel.id == evaluate_id, EvaluateModel.user_id == user_id)
             .first()
         )
 
     def list_recent(
         self,
+        user_id: int,
         limit: int = 20,
         offset: int = 0,
         topic: str | None = None,
     ) -> list[EvaluateModel]:
-        q = self.db.query(EvaluateModel)
+        q = self.db.query(EvaluateModel).filter(EvaluateModel.user_id == user_id)
         if topic:
             q = q.filter(EvaluateModel.topic == topic)
         return q.order_by(EvaluateModel.id.desc()).offset(offset).limit(limit).all()
 
-    def stats(self) -> dict:
-        """总体统计：条数、平均分、按主题聚合"""
+    def stats(self, user_id: int) -> dict:
+        """当前用户统计：条数、平均分、按主题聚合"""
         total, avg_score = self.db.query(
             func.count(EvaluateModel.id),
             func.avg(EvaluateModel.score),
-        ).one()
+        ).filter(EvaluateModel.user_id == user_id).one()
 
         topic_rows = (
             self.db.query(
@@ -72,6 +76,7 @@ class EvaluateDAO:
                 func.avg(EvaluateModel.score),
                 func.max(EvaluateModel.created_at),
             )
+            .filter(EvaluateModel.user_id == user_id)
             .group_by(EvaluateModel.topic)
             .order_by(func.max(EvaluateModel.created_at).desc())
             .all()

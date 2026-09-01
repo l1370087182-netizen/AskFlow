@@ -8,18 +8,18 @@
 from __future__ import annotations
 
 import json
-import time
+import secrets
 from collections.abc import Generator
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from DAO.jd_dao import JDDAO
+from auth.deps import get_current_user
 from DAO.tech_term_dao import TechTermDAO
-from database.session import SessionLocal, get_db
+from database.session import SessionLocal
 from generation.llm import ChatLLM
 from interview.analyzer import InterviewAnalyzer
 from interview.prompts import (
@@ -28,6 +28,7 @@ from interview.prompts import (
     INTERVIEWER_PROMPT,
 )
 from jd_analyzer.analyzer import JDAnalyzer
+from model.UserModel import UserModel
 from ocr.ocr_client import OCRClient
 from util.session_store import load_session, save_session
 
@@ -82,19 +83,23 @@ def _recommend(gap: list[str], db: Session) -> list[dict]:
 def start(
     jd: UploadFile = File(..., description="JD 截图"),
     resume: UploadFile = File(..., description="简历截图"),
+    user: UserModel = Depends(get_current_user),
 ):
-    """上传双图，返回面试会话与第一个问题"""
+    """上传双图，返回面试会话与第一个问题（会话存当前用户目录）"""
     jd_text = _ocr(jd)
     resume_text = _ocr(resume)
     if not jd_text.strip():
         raise HTTPException(status_code=422, detail="JD 未识别出文字")
 
+    uid = user.id
     llm = ChatLLM()
     jd_analysis = JDAnalyzer().analyze(jd_text)
     resume = InterviewAnalyzer(llm).extract_resume(resume_text)
 
-    session_id = f"iv-{int(time.time())}"
+    # 强随机 id（弃用秒级时间戳，消除同秒碰撞；目录隔离后他人也无法访问）
+    session_id = f"iv-{secrets.token_urlsafe(12)}"
     save_session(
+        uid,
         session_id,
         "interview",
         {"messages": [], "meta": {"jd_analysis": jd_analysis, "resume": resume, "rounds": 0}},
@@ -108,9 +113,9 @@ def start(
         ],
         temperature=0.5,
     )
-    data = load_session(session_id, "interview")
+    data = load_session(uid, session_id, "interview")
     data["messages"].append({"role": "assistant", "content": first})
-    save_session(session_id, "interview", data)
+    save_session(uid, session_id, "interview", data)
 
     return {
         "session_id": session_id,
@@ -128,18 +133,25 @@ class AnswerRequest(BaseModel):
 
 
 @router.post("/answer")
-def answer(body: AnswerRequest):
-    """SSE：点评+追问；结束→总评+推荐"""
+def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
+    """SSE：点评+追问；结束→总评+推荐（只读本用户的面试会话）"""
+    uid = user.id
 
     def generate() -> Generator[str, None, None]:
         db = SessionLocal()
         llm = ChatLLM()
         try:
-            session = load_session(body.session_id, "interview")
+            session = load_session(uid, body.session_id, "interview")
             meta = session.get("meta", {})
             jd_analysis = meta.get("jd_analysis", {})
             resume = meta.get("resume", {})
             rounds = meta.get("rounds", 0)
+
+            # 会话不存在（拿别人的 id / 已结束重置 / 根本没开始）：明确报错，
+            # 而不是拿空 meta 去调 LLM
+            if not jd_analysis:
+                yield _sse({"type": "error", "message": "面试会话不存在或已结束"})
+                return
 
             if body.finish or rounds >= MAX_ROUNDS:
                 # 总评
@@ -157,7 +169,7 @@ def answer(body: AnswerRequest):
                 # 推荐学习卡片（JD required 且简历未覆盖）
                 gap = InterviewAnalyzer.compute_gap(jd_analysis, resume)
                 yield _sse({"type": "recs", "items": _recommend(gap, db)})
-                save_session(body.session_id, "interview", {"messages": [], "meta": {}})
+                save_session(uid, body.session_id, "interview", {"messages": [], "meta": {}})
                 yield _sse({"type": "done"})
                 return
 
@@ -174,7 +186,7 @@ def answer(body: AnswerRequest):
             session["messages"].append({"role": "user", "content": body.message})
             session["messages"].append({"role": "assistant", "content": "".join(out2)})
             meta["rounds"] = rounds + 1
-            save_session(body.session_id, "interview", session)
+            save_session(uid, body.session_id, "interview", session)
             yield _sse({"type": "round", "rounds": rounds + 1, "max_rounds": MAX_ROUNDS})
             yield _sse({"type": "done"})
         except Exception as e:  # noqa: BLE001

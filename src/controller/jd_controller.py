@@ -11,8 +11,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from DAO.jd_dao import JDDAO
+from auth.deps import get_current_user
 from database.session import get_db
 from jd_analyzer.analyzer import JDAnalyzer
+from model.UserModel import UserModel
 from ocr.ocr_client import OCRClient
 from schema.jd import JDAnalyzeResponse, JDItem, JDListResponse, TechStackItem
 
@@ -33,6 +35,7 @@ MIME_MAP = {
 def analyze_jd(
     file: UploadFile = File(..., description="JD 截图"),
     db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
 ):
     """上传 JD 截图，走 截图落盘 → OCR → LLM 提取技术栈 → 落库 全流程
 
@@ -56,7 +59,7 @@ def analyze_jd(
     image_path.write_bytes(image_bytes)
 
     dao = JDDAO(db)
-    jd = dao.create(filename=filename, image_path=str(image_path))
+    jd = dao.create(user_id=user.id, filename=filename, image_path=str(image_path))
 
     try:
         # 3) OCR 识别截图文字
@@ -94,10 +97,14 @@ def analyze_jd(
 
 
 @router.get("/{jd_id}", response_model=JDAnalyzeResponse)
-def get_jd(jd_id: int, db: Session = Depends(get_db)):
-    """查询单条分析结果"""
+def get_jd(
+    jd_id: int,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """查询单条分析结果（越权查询返回 404，不泄露存在性）"""
     dao = JDDAO(db)
-    jd = dao.get_by_id(jd_id)
+    jd = dao.get_by_id(jd_id, user.id)
     if not jd:
         raise HTTPException(status_code=404, detail="未找到该 JD 记录")
     stack = dao.get_stack(jd_id)
@@ -113,11 +120,14 @@ def get_jd(jd_id: int, db: Session = Depends(get_db)):
 
 @router.get("/", response_model=JDListResponse)
 def list_jd(
-    limit: int = 20, offset: int = 0, db: Session = Depends(get_db)
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
 ):
-    """分析记录列表"""
+    """分析记录列表（仅当前用户）"""
     dao = JDDAO(db)
-    rows = dao.list_recent(limit=limit, offset=offset)
+    rows = dao.list_recent(user.id, limit=limit, offset=offset)
     return JDListResponse(
         total=len(rows),
         items=[JDItem.model_validate(r) for r in rows],

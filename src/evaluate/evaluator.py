@@ -130,6 +130,7 @@ def extract_structured(text: str, llm: ChatLLM | None = None) -> dict:
 def save_evaluation(
     db: Session,
     *,
+    user_id: int,
     session_id: str,
     topic: str,
     rounds: int,
@@ -139,6 +140,7 @@ def save_evaluation(
     structured = extract_structured(evaluation_text)
     dao = EvaluateDAO(db)
     row = dao.create(
+        user_id=user_id,
         session_id=session_id,
         topic=topic,
         rounds=rounds,

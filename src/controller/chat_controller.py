@@ -13,21 +13,28 @@ import json
 import logging
 from collections.abc import Generator
 from datetime import datetime
-from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from DAO.user_dao import UserDAO
+from auth.deps import get_current_user
 from core.config import settings
 from database.session import SessionLocal
 from evaluate.evaluator import save_evaluation
 from generation.chain import ChainBuilder, format_context
 from generation.llm import ChatLLM
 from generation.prompts import FINISH_KEYWORDS, MAX_TEACH_ROUNDS
+from model.UserModel import UserModel
 from schema.chat import ChatRequest, LLMConfig, PingRequest
-from util.session_store import delete_session_files, load_session, save_session
+from util.session_store import (
+    delete_session_files,
+    list_user_session_files,
+    load_session,
+    save_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +49,7 @@ def _sse(event: dict) -> str:
 
 
 def _build_llm(cfg: LLMConfig | None) -> ChatLLM:
-    """按用户自定义配置构造 ChatLLM；没配就用服务端默认模型
-
-    协议识别：显式 openai/anthropic 优先；auto 按地址关键字（含 anthropic 走
-    Anthropic Messages，否则 OpenAI 兼容）。自定义地址未填模型名时给合理默认。
-    """
+    """按请求里透传的自定义配置构造 ChatLLM（现仅 /ping 探测未保存配置用）"""
     if cfg and cfg.base_url.strip() and cfg.api_key.strip():
         provider = cfg.provider or "auto"
         model = cfg.model.strip()
@@ -57,6 +60,24 @@ def _build_llm(cfg: LLMConfig | None) -> ChatLLM:
             provider=provider,
             base_url=cfg.base_url.strip(),
             api_key=cfg.api_key.strip(),
+            model=model,
+        )
+    return ChatLLM()
+
+
+def _build_llm_for_user(db: Session, uid: int) -> ChatLLM:
+    """按用户私有模型配置构造 ChatLLM（阶段 11：替代请求透传，配置存服务端）"""
+    cfg = UserDAO(db).get_llm_config(uid)
+    if cfg["base_url"].strip() and cfg["api_key"].strip():
+        provider = cfg["provider"] or "auto"
+        model = cfg["model"].strip()
+        if not model:
+            resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
+            model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
+        return ChatLLM(
+            provider=provider,
+            base_url=cfg["base_url"].strip(),
+            api_key=cfg["api_key"].strip(),
             model=model,
         )
     return ChatLLM()
@@ -77,10 +98,10 @@ def _stream_events(
 # ---------- 讲解模式 ----------
 
 def _chat_ask(
-    db: Session, body: ChatRequest, llm: ChatLLM, chain: ChainBuilder
+    db: Session, body: ChatRequest, llm: ChatLLM, chain: ChainBuilder, uid: int
 ) -> Generator[str, None, None]:
     """讲解模式：每条消息即时检索，基于片段流式回答"""
-    session = load_session(body.session_id, "ask")
+    session = load_session(uid, body.session_id, "ask")
 
     messages, results = chain.build_ask(body.message, session["messages"])
 
@@ -107,7 +128,7 @@ def _chat_ask(
     # 落盘会话记忆（用户消息 + 助手回复）
     session["messages"].append({"role": "user", "content": body.message})
     session["messages"].append({"role": "assistant", "content": reply})
-    save_session(body.session_id, "ask", session)
+    save_session(uid, body.session_id, "ask", session)
 
     yield _sse({"type": "done"})
 
@@ -115,10 +136,10 @@ def _chat_ask(
 # ---------- 费曼模式 ----------
 
 def _chat_teach(
-    db: Session, body: ChatRequest, llm: ChatLLM, chain: ChainBuilder
+    db: Session, body: ChatRequest, llm: ChatLLM, chain: ChainBuilder, uid: int
 ) -> Generator[str, None, None]:
     """费曼模式：选题 → 追问 → 总结评分 三阶段状态机"""
-    session = load_session(body.session_id, "teach")
+    session = load_session(uid, body.session_id, "teach")
     meta = session["meta"]
     msg = body.message.strip()
     is_finish = body.finish or msg.lower() in FINISH_KEYWORDS
@@ -131,7 +152,7 @@ def _chat_teach(
         # 检索参考答案：藏进系统提示当「标准答案」，不直接展示给用户
         results = chain.retriever.search(topic, top_k=5)
         meta.update({"topic": topic, "reference": format_context(results), "rounds": 0})
-        save_session(body.session_id, "teach", session)
+        save_session(uid, body.session_id, "teach", session)
 
         if not body.topic:
             # 未显式传 topic：本轮消息就是主题本身，只做开场，不算讲解内容
@@ -150,7 +171,7 @@ def _chat_teach(
                 llm, chain.build_teach_opening(session), temperature=0.7, out=out
             )
             session["messages"].append({"role": "assistant", "content": "".join(out)})
-            save_session(body.session_id, "teach", session)
+            save_session(uid, body.session_id, "teach", session)
             yield _sse({"type": "done"})
             return
         # 显式传了 topic：当前消息是第一段讲解，继续往下走追问逻辑
@@ -171,6 +192,7 @@ def _chat_teach(
         try:
             save_evaluation(
                 db,
+                user_id=uid,
                 session_id=body.session_id,
                 topic=meta["topic"],
                 rounds=cur_rounds,
@@ -181,7 +203,7 @@ def _chat_teach(
         # 保留完整对话历史（持久化，侧边栏可见）；只清主题状态以便下次开新主题
         for key in ("topic", "reference", "rounds"):
             meta.pop(key, None)
-        save_session(body.session_id, "teach", session)
+        save_session(uid, body.session_id, "teach", session)
 
     # ---- 阶段 2：主动结束 → 评分 ----
     rounds = meta.get("rounds", 0)
@@ -234,7 +256,7 @@ def _chat_teach(
     session["messages"].append({"role": "user", "content": msg})
     session["messages"].append({"role": "assistant", "content": reply})
     meta["rounds"] = rounds + 1
-    save_session(body.session_id, "teach", session)
+    save_session(uid, body.session_id, "teach", session)
 
     yield _sse({"type": "done"})
 
@@ -242,7 +264,7 @@ def _chat_teach(
 # ---------- 路由 ----------
 
 @router.post("")
-def chat(body: ChatRequest):
+def chat(body: ChatRequest, user: UserModel = Depends(get_current_user)):
     """双模式对话（SSE 流式）
 
     事件类型：
@@ -252,18 +274,20 @@ def chat(body: ChatRequest):
         done        —— 本轮结束
         error       —— 异常 {"message": "..."}
     """
+    # 只捕获 uid（int），不把 ORM 对象带进生成器（避免跨 Session detached）
+    uid = user.id
 
     def generate() -> Generator[str, None, None]:
         # 流式响应不能用 Depends(get_db)：
         # 端点函数返回时依赖就会关闭，而流才刚开始。改为手动管理会话。
         db = SessionLocal()
-        llm = _build_llm(body.llm)
+        llm = _build_llm_for_user(db, uid)
         try:
             chain = ChainBuilder(db)
             if body.mode == "ask":
-                yield from _chat_ask(db, body, llm, chain)
+                yield from _chat_ask(db, body, llm, chain, uid)
             else:
-                yield from _chat_teach(db, body, llm, chain)
+                yield from _chat_teach(db, body, llm, chain, uid)
         except Exception as e:  # noqa: BLE001 —— SSE 里异常也要发给前端
             logger.exception("[chat] 对话异常")
             yield _sse({"type": "error", "message": f"对话失败：{e}"})
@@ -285,9 +309,10 @@ def chat(body: ChatRequest):
 def history(
     session_id: str = Query(default="default", max_length=64),
     mode: Literal["ask", "teach"] = Query(default="ask"),
+    user: UserModel = Depends(get_current_user),
 ):
-    """拉取会话历史（meta 中不外泄费曼模式的参考答案）"""
-    session = load_session(session_id, mode)
+    """拉取会话历史（只读本用户目录；meta 中不外泄费曼模式的参考答案）"""
+    session = load_session(user.id, session_id, mode)
     meta = session.get("meta", {})
     safe_meta = {k: v for k, v in meta.items() if k != "reference"}
     return {
@@ -302,7 +327,7 @@ def history(
 def ping_llm(body: PingRequest):
     """模型连通性测试：用用户配置发一句极简对话，成功返回 ok
 
-    不写任何会话记录，纯探测地址/密钥/模型是否可用。
+    不写任何会话记录，纯探测地址/密钥/模型是否可用（测的是弹窗里未保存的配置）。
     """
     try:
         llm = _build_llm(body.llm)
@@ -321,38 +346,36 @@ def ping_llm(body: PingRequest):
 
 
 @router.get("/sessions")
-def list_sessions():
-    """会话列表：按 (会话, 模式) 拆分，讲解/费曼历史各自独立
+def list_sessions(user: UserModel = Depends(get_current_user)):
+    """会话列表：只扫当前用户目录，按 (会话, 模式) 拆分，讲解/费曼各自独立
 
     每个落盘文件 {sid}_{mode}.json 就是一条会话记录，标题取该模式第一条用户消息。
     """
-    base = Path(settings.SESSION_DIR)
     items: list[dict] = []
 
-    if base.exists():
-        for f in base.glob("*.json"):
-            sid, _, mode = f.stem.rpartition("_")
-            if mode not in ("ask", "teach") or not sid:
-                continue
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001 —— 坏文件跳过
-                continue
-            msgs = data.get("messages", [])
-            if not msgs:  # 空会话不进列表
-                continue
-            first = next(
-                (m["content"] for m in msgs if m.get("role") == "user"), ""
-            )
-            items.append(
-                {
-                    "session_id": sid,
-                    "mode": mode,
-                    "title": (first.strip().replace("\n", " ")[:30]) or "新对话",
-                    "messages": len(msgs),
-                    "updated": f.stat().st_mtime,
-                }
-            )
+    for f in list_user_session_files(user.id):
+        sid, _, mode = f.stem.rpartition("_")
+        if mode not in ("ask", "teach") or not sid:
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 —— 坏文件跳过
+            continue
+        msgs = data.get("messages", [])
+        if not msgs:  # 空会话不进列表
+            continue
+        first = next(
+            (m["content"] for m in msgs if m.get("role") == "user"), ""
+        )
+        items.append(
+            {
+                "session_id": sid,
+                "mode": mode,
+                "title": (first.strip().replace("\n", " ")[:30]) or "新对话",
+                "messages": len(msgs),
+                "updated": f.stat().st_mtime,
+            }
+        )
 
     items.sort(key=lambda x: x["updated"], reverse=True)
     for it in items[:50]:
@@ -364,7 +387,8 @@ def list_sessions():
 def delete_session(
     session_id: str,
     mode: Literal["ask", "teach"] | None = Query(default=None),
+    user: UserModel = Depends(get_current_user),
 ):
-    """删除会话：mode 指定时只删该模式的历史，否则两种模式都删"""
-    deleted = delete_session_files(session_id, mode)
+    """删除会话（只删本用户目录）：mode 指定时只删该模式，否则两种模式都删"""
+    deleted = delete_session_files(user.id, session_id, mode)
     return {"session_id": session_id, "deleted": deleted}

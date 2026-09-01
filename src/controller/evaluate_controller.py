@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from DAO.evaluate_dao import EvaluateDAO
+from auth.deps import get_current_user
 from database.session import get_db
+from model.UserModel import UserModel
 from schema.evaluate import (
     EvaluateItem,
     EvaluateListResponse,
@@ -23,10 +25,11 @@ def list_evaluations(
     limit: int = 20,
     offset: int = 0,
     db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
 ):
-    """评分记录列表（最新在前）"""
+    """评分记录列表（仅当前用户，最新在前）"""
     dao = EvaluateDAO(db)
-    rows = dao.list_recent(limit=limit, offset=offset, topic=topic)
+    rows = dao.list_recent(user.id, limit=limit, offset=offset, topic=topic)
     return EvaluateListResponse(
         total=len(rows),
         items=[EvaluateItem.from_row(r) for r in rows],
@@ -34,9 +37,11 @@ def list_evaluations(
 
 
 @router.get("/stats", response_model=EvaluateStats)
-def evaluation_stats(db: Session = Depends(get_db)):
-    """聚合统计：总条数、平均分、各主题掌握情况"""
-    data = EvaluateDAO(db).stats()
+def evaluation_stats(
+    db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)
+):
+    """聚合统计（仅当前用户）：总条数、平均分、各主题掌握情况"""
+    data = EvaluateDAO(db).stats(user.id)
     return EvaluateStats(
         total=data["total"],
         avg_score=data["avg_score"],
@@ -45,9 +50,13 @@ def evaluation_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/{evaluate_id}", response_model=EvaluateItem)
-def get_evaluation(evaluate_id: int, db: Session = Depends(get_db)):
-    """单条评分详情"""
-    row = EvaluateDAO(db).get_by_id(evaluate_id)
+def get_evaluation(
+    evaluate_id: int,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """单条评分详情（越权查询返回 404，不泄露存在性）"""
+    row = EvaluateDAO(db).get_by_id(evaluate_id, user.id)
     if not row:
         raise HTTPException(status_code=404, detail="未找到该评估记录")
     return EvaluateItem.from_row(row)

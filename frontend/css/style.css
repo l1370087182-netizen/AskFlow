@@ -403,3 +403,54 @@ a { color: var(--brand); text-decoration: none; }
 }
 .input-inner textarea:focus { border-color: var(--brand); background: #fff; }
 .hint { max-width: 860px; margin: 8px auto 0; font-size: 12px; color: var(--ink-3); }
+
+/* ---------- 登录/注册/忘记密码页 ---------- */
+.auth-wrap {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: radial-gradient(1200px 600px at 20% -10%, #eef1fe 0%, var(--bg) 55%);
+}
+.auth-card {
+  width: min(440px, 100%);
+  background: var(--card); border-radius: 22px; box-shadow: var(--shadow-lg);
+  padding: 34px 34px 30px;
+}
+.auth-logo { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 8px; }
+.auth-logo .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--brand); }
+.auth-sub { color: var(--ink-3); font-size: 13px; margin: 4px 0 22px; }
+
+.auth-tabs {
+  display: flex; background: var(--bg); border-radius: 999px; padding: 3px;
+  margin-bottom: 22px;
+}
+.auth-tab {
+  flex: 1; border: none; background: transparent; cursor: pointer;
+  padding: 8px 0; border-radius: 999px; font-size: 13px; color: var(--ink-2);
+}
+.auth-tab.active { background: var(--card); color: var(--brand); font-weight: 700; box-shadow: var(--shadow); }
+
+.auth-form { display: flex; flex-direction: column; gap: 2px; }
+.auth-form .set-row { margin-bottom: 14px; }
+.auth-form .set-row > span { flex: none; width: 72px; }
+.auth-submit { justify-content: center; margin-top: 6px; }
+.auth-msg { font-size: 13px; margin-top: 16px; min-height: 20px; text-align: center; }
+.auth-msg.err { color: var(--red); }
+.auth-msg.ok { color: var(--green); }
+
+/* 验证码行：输入框 + 发送按钮 */
+.code-row input { flex: 1; }
+.code-btn { flex: none; white-space: nowrap; padding: 7px 14px; }
+.code-btn[disabled] { opacity: .6; cursor: not-allowed; }
+
+/* ---------- 顶栏用户区（topbar-user.js 注入）---------- */
+.topbar-user { display: flex; align-items: center; gap: 10px; margin-left: 12px; }
+.tu-email {
+  font-size: 12.5px; color: var(--ink-2); max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tu-logout {
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink-2);
+  border-radius: 999px; padding: 4px 14px; font-size: 12.5px; cursor: pointer;
+}
+.tu-logout:hover { background: var(--red-soft); color: var(--red); border-color: var(--red-soft); }

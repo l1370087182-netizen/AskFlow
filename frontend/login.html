@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-logo"><span class="dot"></span>智能技术学习系统</div>
+      <p class="auth-sub">边爬边学的 AI 技术知识库</p>
+
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-tab="login">登录</button>
+        <button type="button" class="auth-tab" data-tab="register">注册</button>
+        <button type="button" class="auth-tab" data-tab="reset">忘记密码</button>
+      </div>
+
+      <!-- 登录 -->
+      <form id="form-login" class="auth-form" autocomplete="on">
+        <div class="set-row"><span>邮箱</span><input id="li-email" type="email" placeholder="you@example.com" required></div>
+        <div class="set-row"><span>密码</span><input id="li-password" type="password" placeholder="登录密码" required></div>
+        <button type="submit" class="btn btn-primary auth-submit">登 录</button>
+      </form>
+
+      <!-- 注册 -->
+      <form id="form-register" class="auth-form" style="display:none" autocomplete="on">
+        <div class="set-row"><span>邮箱</span><input id="rg-email" type="email" placeholder="用于接收验证码" required></div>
+        <div class="set-row code-row">
+          <span>验证码</span>
+          <input id="rg-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required>
+          <button type="button" id="rg-send" class="btn btn-ghost btn-small code-btn">发送验证码</button>
+        </div>
+        <div class="set-row"><span>密码</span><input id="rg-password" type="password" placeholder="至少 6 位" required minlength="6" maxlength="64"></div>
+        <div class="set-row"><span>确认密码</span><input id="rg-password2" type="password" placeholder="再输一次" required></div>
+        <button type="submit" class="btn btn-primary auth-submit">注 册</button>
+      </form>
+
+      <!-- 忘记密码 -->
+      <form id="form-reset" class="auth-form" style="display:none" autocomplete="on">
+        <div class="set-row"><span>邮箱</span><input id="rs-email" type="email" placeholder="注册时使用的邮箱" required></div>
+        <div class="set-row code-row">
+          <span>验证码</span>
+          <input id="rs-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required>
+          <button type="button" id="rs-send" class="btn btn-ghost btn-small code-btn">发送验证码</button>
+        </div>
+        <div class="set-row"><span>新密码</span><input id="rs-password" type="password" placeholder="至少 6 位" required minlength="6" maxlength="64"></div>
+        <button type="submit" class="btn btn-primary auth-submit">重置密码</button>
+      </form>
+
+      <p id="auth-msg" class="auth-msg"></p>
+    </div>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/login.js"></script>
+</body>
+</html>

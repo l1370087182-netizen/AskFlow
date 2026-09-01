@@ -17,6 +17,7 @@ wheels/
 data/
 sessions/
 storage/
+dump.rdb
 
 # IDE / editor
 .cursor/

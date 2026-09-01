@@ -14,6 +14,10 @@ class JDModel(Base):
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True, comment="主键"
     )
+    # 所属用户；存量行留 NULL（阶段 11 之前的旧数据作废，任何用户都查不到）
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True, comment="所属用户"
+    )
     filename: Mapped[str] = mapped_column(
         String(255), nullable=False, default="", comment="原始文件名"
     )

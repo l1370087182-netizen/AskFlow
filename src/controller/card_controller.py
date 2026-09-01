@@ -14,6 +14,7 @@ import redis
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from auth.deps import get_current_user
 from core.config import settings
 from DAO.tech_term_dao import TechTermDAO
 from database.session import get_db
@@ -63,8 +64,8 @@ def _to_card(term: TechTermModel, date_str: str) -> dict:
 
 
 @router.get("/overview")
-def overview(db: Session = Depends(get_db)):
-    """系统概览统计：知识条目 / 术语卡片 / 讲解评估（主页展示用）"""
+def overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """系统概览统计：知识条目 / 术语卡片（全局）+ 讲解评估（当前用户）"""
     from sqlalchemy import func as sa_func
 
     from model.KnowledgeModel import KnowledgeModel
@@ -77,7 +78,7 @@ def overview(db: Session = Depends(get_db)):
         .scalar()
         or 0
     )
-    eval_stats = EvaluateDAO(db).stats()
+    eval_stats = EvaluateDAO(db).stats(user.id)
     return {
         "knowledge": knowledge,
         "terms": TechTermDAO(db).count(),

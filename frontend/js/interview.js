@@ -45,7 +45,11 @@ async function start() {
   fd.append('resume', resume);
   let d;
   try {
-    const resp = await fetch(API_BASE + '/api/interview/start', { method: 'POST', body: fd });
+    // FormData：只加鉴权头，勿手工设 Content-Type（会破坏 multipart boundary）
+    const resp = await fetch(API_BASE + '/api/interview/start', {
+      method: 'POST', body: fd, headers: authHeaders(),
+    });
+    if (resp.status === 401) { handleAuthError(resp); return; }
     d = await resp.json();
     if (!resp.ok) throw new Error(d.detail || 'start 失败');
   } catch (e) {
@@ -112,10 +116,14 @@ async function send(finish = false) {
 // answer 端点 SSE 读取（复用 chat 的解析逻辑）
 async function streamChatLike(payload, onEvent) {
   const resp = await fetch(API_BASE + '/api/interview/answer', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   });
-  if (!resp.ok) throw new Error(resp.statusText);
+  if (!resp.ok) {
+    handleAuthError(resp);
+    throw new Error(resp.statusText);
+  }
   const reader = resp.body.getReader();
   const dec = new TextDecoder('utf-8');
   let buf = '';

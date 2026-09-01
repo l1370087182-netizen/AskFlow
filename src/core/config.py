@@ -59,6 +59,30 @@ class Settings(BaseSettings):
     OCR_BASE_URL: str = Field(default="", description="OCR API地址，留空复用 CHAT_BASE_URL")
     OCR_KEY: str = Field(default="", description="OCR密钥，留空复用 CHAT_KEY")
 
+        # ---------- 用户鉴权 ----------
+    AUTH_SECRET_KEY: str = Field(
+        ...,
+        description="JWT 签名密钥，必须配置（它同时是 api_key 加密密钥的派生源，"
+        "更换会导致存量密文解不出）。生成：python -c \"import secrets;print(secrets.token_urlsafe(48))\"",
+    )
+    AUTH_TOKEN_TTL_MIN: int = Field(default=1440, description="登录 token 有效期（分钟），默认 24h")
+    AUTH_PBKDF2_ITERATIONS: int = Field(default=200_000, description="密码哈希迭代次数")
+    FERNET_KEY: str = Field(default="", description="api_key 加密密钥，留空则由 AUTH_SECRET_KEY 派生")
+
+        # ---------- 验证码邮件（SMTP 未配置时验证码只打印到后端日志，便于本地开发）----------
+    SMTP_HOST: str = Field(default="", description="SMTP 服务器，如 smtp.qq.com")
+    SMTP_PORT: int = Field(default=465, description="SMTP 端口，SSL 一般 465")
+    SMTP_USE_SSL: bool = Field(default=True, description="是否用 SSL（465）；False 走 STARTTLS（587）")
+    SMTP_USER: str = Field(default="", description="SMTP 登录账号（一般即发件邮箱）")
+    SMTP_PASSWORD: str = Field(default="", description="SMTP 授权码（不是邮箱登录密码）")
+    SMTP_FROM: str = Field(default="", description="发件人，留空用 SMTP_USER")
+
+        # ---------- 验证码策略 ----------
+    CODE_TTL_SEC: int = Field(default=300, description="验证码有效期（秒）")
+    CODE_RESEND_COOLDOWN: int = Field(default=60, description="同邮箱同用途重发冷却（秒）")
+    CODE_DAILY_LIMIT: int = Field(default=10, description="单邮箱每日验证码上限")
+    CODE_MAX_ATTEMPTS: int = Field(default=5, description="单个验证码允许的校验失败次数")
+
 
 settings = Settings()
 

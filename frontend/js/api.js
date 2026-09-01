@@ -1,16 +1,44 @@
-// API 封装：后端基址 + 通用请求/SSE 流读取
+// API 封装：后端基址 + 通用请求/SSE 流读取 + 登录态（Bearer token）
 // 本地开发：前端 10001、后端独立 4399，用当前访问的 host 拼基址，
 // 本机（127.0.0.1）和局域网（192.168.x.x）访问都能通。
 // 部署环境：Nginx 同源反代 /api 到后端，基址留空走同源。
 
 const API_BASE = location.port === '10001' ? `http://${location.hostname}:4399` : '';
 
+// ---------- 登录态 ----------
+
+function getToken() {
+  return localStorage.getItem('rag_token') || '';
+}
+
+// 所有请求统一携带的鉴权头（FormData 请求勿手工设 Content-Type）
+function authHeaders() {
+  const t = getToken();
+  return t ? { Authorization: 'Bearer ' + t } : {};
+}
+
+// 401 → 登录失效：清 token 并跳登录页（登录页本身不跳，防死循环）
+function handleAuthError(resp) {
+  if (resp.status === 401 && !location.pathname.endsWith('login.html')) {
+    localStorage.removeItem('rag_token');
+    const next = encodeURIComponent(location.pathname + location.search);
+    location.href = 'login.html?next=' + next;
+    return true;
+  }
+  return false;
+}
+
+async function _errDetail(resp) {
+  let detail = resp.statusText;
+  try { detail = (await resp.json()).detail || detail; } catch (e) {}
+  return detail;
+}
+
 async function apiGet(path) {
-  const resp = await fetch(API_BASE + path);
+  const resp = await fetch(API_BASE + path, { headers: authHeaders() });
   if (!resp.ok) {
-    let detail = resp.statusText;
-    try { detail = (await resp.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    handleAuthError(resp);
+    throw new Error(await _errDetail(resp));
   }
   return resp.json();
 }
@@ -18,23 +46,37 @@ async function apiGet(path) {
 async function apiPostJson(path, body) {
   const resp = await fetch(API_BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
-    let detail = resp.statusText;
-    try { detail = (await resp.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    handleAuthError(resp);
+    throw new Error(await _errDetail(resp));
+  }
+  return resp.json();
+}
+
+async function apiPutJson(path, body) {
+  const resp = await fetch(API_BASE + path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    handleAuthError(resp);
+    throw new Error(await _errDetail(resp));
   }
   return resp.json();
 }
 
 async function apiDelete(path) {
-  const resp = await fetch(API_BASE + path, { method: 'DELETE' });
+  const resp = await fetch(API_BASE + path, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
   if (!resp.ok) {
-    let detail = resp.statusText;
-    try { detail = (await resp.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    handleAuthError(resp);
+    throw new Error(await _errDetail(resp));
   }
   return resp.json();
 }
@@ -48,13 +90,12 @@ async function apiDelete(path) {
 async function streamChat(payload, onEvent) {
   const resp = await fetch(API_BASE + '/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
   });
   if (!resp.ok) {
-    let detail = resp.statusText;
-    try { detail = (await resp.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    handleAuthError(resp);
+    throw new Error(await _errDetail(resp));
   }
 
   const reader = resp.body.getReader();
@@ -77,16 +118,6 @@ async function streamChat(payload, onEvent) {
       }
     }
   }
-}
-
-// 会话标识：同一浏览器固定一个，两种模式的上下文由后端分开存
-function getSessionId() {
-  let id = localStorage.getItem('rag_session_id');
-  if (!id) {
-    id = 'u-' + Math.random().toString(36).slice(2, 10);
-    localStorage.setItem('rag_session_id', id);
-  }
-  return id;
 }
 
 // 分类英文 → 中文展示名（数据层存的是英文分类标识）

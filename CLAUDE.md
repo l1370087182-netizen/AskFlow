@@ -1,8 +1,9 @@
 # 智能技术学习系统（RAG 学习版）开发文档
 
-> 版本：v0.7（2026-08-28）
+> 版本：v0.8（2026-09-01）
 > 架构来源：飞书文档《RAG 项目架构》（本地权威副本：`.cursor/rules/rag-feishu-architecture.mdc`）
 > 协作约定：助手可直接读写仓库代码（v0.3 起取消「代码全部手写」限制），改动需与本文档的架构和目录约定保持一致，关键决策做简要说明。
+> v0.8 新增：用户鉴权（邮箱验证码注册/登录/忘记密码）+ 全部用户数据按账号隔离（对话/评估/面试/模型配置），见「阶段 11」。
 
 ---
 
@@ -34,6 +35,7 @@
 | 关键词检索 | rank_bm25 + jieba | BM25，与向量结果混合 |
 | 重排序 | bge-reranker（API） | 混合结果精排 |
 | LLM | 大模型 Chat API（流式，双协议） | 双模式对话生成；OpenAI 兼容协议（httpx）+ Anthropic Messages 协议（官方 anthropic SDK），用户可自配 base_url/api_key/model |
+| 鉴权 | PyJWT + 标准库（pbkdf2/smtplib）+ cryptography(Fernet) | 用户注册/登录/忘记密码、JWT 凭证、密码哈希、邮箱验证码、私有 api_key 加密（仅新增 PyJWT 一个依赖） |
 
 ---
 
@@ -70,8 +72,11 @@ project/
 │   ├── index.html           # 主页：每日学习卡片
 │   ├── chat.html            # 对话页：讲解/费曼双模式
 │   ├── kb.html              # 知识库页：分类聚合+条目列表+正文弹窗
+│   ├── interview.html       # 模拟面试页：双图上传+逐轮追问
+│   ├── login.html           # 登录/注册/忘记密码三合一（阶段11）
 │   ├── css/style.css
-│   └── js/                  # api.js / home.js / chat.js / kb.js / highlight.js（代码高亮+富文本）
+│   └── js/                  # api.js / home.js / chat.js / kb.js / interview.js /
+│                            # login.js / topbar-user.js（登录态+顶栏用户区）/ highlight.js
 └── src/
     ├── main.py              # FastAPI 入口（现暂用根目录 main.py，后续迁移）
     ├── config/
@@ -84,7 +89,10 @@ project/
     │   ├── card_controller.py      # 每日学习卡片 ✅
     │   ├── jd_controller.py        # JD分析接口 ✅
     │   ├── evaluate_controller.py  # 知识点评估接口 ✅
-    │   └── chat_controller.py      # 问答接口（讲解/费曼双模式）✅
+    │   ├── chat_controller.py      # 问答接口（讲解/费曼双模式）✅
+    │   ├── interview_controller.py # 模拟面试（JD+简历双图）✅
+    │   ├── auth_controller.py      # 注册/登录/忘记密码/当前用户 ✅（唯一免鉴权）
+    │   └── user_controller.py      # 用户私有模型配置 /api/user/llm ✅
     ├── service/             # 业务逻辑层
     │   ├── spider_service.py
     │   ├── knowledge_service.py
@@ -93,19 +101,28 @@ project/
     ├── dao/                 # 数据访问层（现目录名 DAO/）
     │   ├── knowledge_dao.py
     │   ├── jd_dao.py
-    │   └── evaluate_dao.py
+    │   ├── evaluate_dao.py
+    │   ├── tech_term_dao.py
+    │   └── user_dao.py             # 用户账号/改密/私有模型配置 ✅
     ├── database/            # engine、sessionmaker、Base、get_db
     │   └── session.py
     ├── model/               # ORM 数据模型
     │   ├── KnowledgeModel.py       # 知识库表 ✅已建
-    │   ├── JDModel.py
+    │   ├── JDModel.py              # +user_id（阶段11）
     │   ├── TechStackModel.py
-    │   └── EvaluateModel.py
+    │   ├── EvaluateModel.py        # +user_id（阶段11）
+    │   ├── TechTermModel.py
+    │   └── UserModel.py            # 用户账号+私有模型配置 ✅（阶段11）
     ├── schema/              # Pydantic DTO
     │   ├── knowledge.py ✅
     │   ├── jd.py
     │   ├── evaluate.py
+    │   ├── auth.py                 # 注册/登录/验证码/用户/模型配置 DTO ✅（阶段11）
     │   └── chat.py                 # 对话请求/响应（含 mode 字段）
+    ├── auth/                # 用户鉴权模块 ✅（阶段11）
+    │   ├── security.py     # pbkdf2 密码哈希 + JWT + Fernet 加解密
+    │   ├── deps.py         # get_current_user 依赖（Bearer）
+    │   └── mailer.py       # 邮箱验证码（Redis 存取/限流 + SMTP 发送）
     ├── milvus/              # 向量库模块
     │   ├── ingestion/       # 向量入库流水线
     │   │   ├── loader.py           # 从MySQL读status=0的知识
@@ -169,7 +186,9 @@ project/
 
 - **tech_term（技术术语表，每日卡片数据源）**：`term`（术语，唯一，如 aigc）、`alias`（别名，逗号分隔）、`category`、`brief`（一句话简介）、`detail`（详细讲解）、`example`（示例）、`source_url`。由 `scripts/seed_terms.py` 从已入库文章标题 + LLM 辅助提炼，归一化判重（忽略大小写/空格/连字符），可重复执行扩充；`--enrich` 模式为存量术语补 `detail`/`example`。
 - **jd / tech_stack（JD 分析，阶段 8）**：`jd` 存截图路径 + OCR 文本 + 职位标题/概括 + 分析原文；`tech_stack` 按 `jd_id` 存技术条目（名称/分类/required-bonus/JD 语境）。
-- **evaluate（费曼讲解评分记录，阶段 9）**：`session_id`、`topic`、`rounds`（追问轮数）、`score`（0-10，可空）、`summary`（总结复述）、`correct_points` / `wrong_points` / `missed_points`（JSON 数组）、`raw`（评分 markdown 原文）。由对话接口在评分产生时联动写入。
+- **evaluate（费曼讲解评分记录，阶段 9）**：`session_id`、`topic`、`rounds`（追问轮数）、`score`（0-10，可空）、`summary`（总结复述）、`correct_points` / `wrong_points` / `missed_points`（JSON 数组）、`raw`（评分 markdown 原文）。由对话接口在评分产生时联动写入。**阶段 11 加 `user_id` 列（可空、索引），按用户隔离；存量行留 NULL 作废。**
+- **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=用服务端默认）、`created_at` / `updated_at`。
+- **jd 表（阶段 11 补 `user_id` 列）**：同 evaluate，按用户隔离，存量行留 NULL 作废。
 
 ---
 
@@ -188,6 +207,7 @@ project/
 | 8 | JD 分析（OCR+技术栈） | ✅ 完成 | `ocr/ocr_client.py`（视觉模型读图）+ `jd_analyzer/`（LLM 提炼结构化技术栈）+ `/api/jd/*` |
 | 9 | 知识点评估 | ✅ 完成 | `evaluate/`（解析+评分规则）+ evaluate 表 + `/api/evaluate/*`，与费曼评分联动落库 |
 | 10 | 前端 | ✅ 完成 | 原生 HTML/CSS/JS：主页（每日卡片+跳转）+ 对话页（双模式切换、SSE 流式、评分卡片），端口 10001 |
+| 11 | 用户鉴权 + 数据隔离 | ✅ 完成 | 邮箱验证码注册/登录/忘记密码；对话/评估/面试/模型配置按用户隔离；仅新增 PyJWT 依赖 |
 
 ### 爬虫模块已完成部分清点
 
@@ -273,7 +293,7 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - 评分记录落库（阶段 9 已联动）：评分产生时由 `evaluate/evaluator.py` 解析（正则优先、LLM 兜底）写入 evaluate 表
 - 注意：**总结评分轮要切换成「评分员」系统提示**（退出学生人设）。沿用学生人设时模型会抗拒结束、继续追问，导致评分格式解析失败
 
-**记忆**：会话历史按 `session_id` 以 JSON 存 `sessions/` 目录（`{id}_{mode}.json`）。讲解/费曼两种模式历史完全分开：侧边栏按模式各自列出、独立新建/删除（删除按模式删单个文件）；对话页工具栏有显眼的当前模型徽标，用户可在 ⚙️ 自配 OpenAI/Anthropic 模型（随请求透传 `llm` 字段）。
+**记忆**：会话历史按「用户 + 会话」以 JSON 存 `sessions/{user_id}/{id}_{mode}.json`（阶段 11 起加用户子目录，天然隔离他人会话）。讲解/费曼两种模式历史完全分开：侧边栏按模式各自列出、独立新建/删除。对话页工具栏有显眼的当前模型徽标，用户可在 ⚙️ 自配 OpenAI/Anthropic 模型——**配置存服务端 user 表（api_key Fernet 加密），按用户隔离，不再随请求透传**（`/api/chat` 不再消费请求体 `llm` 字段，改读当前登录用户的库内配置）。
 
 **③ 双协议接入（v0.4 新增）——OpenAI 兼容 / Anthropic Messages**
 
@@ -293,6 +313,27 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
   - 命中 → 直接返回；未命中 → 随机抽一条（用日期做随机种子，保证当天稳定）→ 写回 Redis，过期时间设到当天 24:00
 - 同一天多次刷新卡片内容不变；换天自动换新
 - 前端主页卡片展示：术语 + 一句话简介 + 「去问 AI」跳转按钮
+
+### 7.6 用户鉴权与数据隔离（阶段 11，重点）
+
+**凭证**：`Authorization: Bearer <JWT>`（HS256，payload 含 sub/exp/iat/ver）。因 CORS `allow_credentials=False`（跨域 cookie 走不通），统一用 Bearer 头；前端 `api.js` 四个请求函数统一注入，401 → 清 token 跳 `login.html`。
+
+**注册/登录/忘记密码**（`/api/auth/*`，唯一免鉴权路由）：
+- `POST /send-code {email, purpose: register|reset}`：邮箱发验证码（6 位，Redis 存 300s）。限流：60s 重发冷却、单邮箱日 10 封、校验错 5 次作废。`purpose=register` 查重、`reset` 查存在。
+- `POST /register {email, code, password}`：验证码 `GETDEL` 原子消费（防双花）+ 建号，返回 token。密码 6–64 位。
+- `POST /login`：统一话术「邮箱或密码错误」（防邮箱枚举）。
+- `POST /reset`：改密同时 `token_ver += 1`，旧 JWT 立即失效。
+- `GET /me`：当前用户（前端 topbar 展示 + token 探活）。
+- 邮件：`SMTP_*` 配置走 `smtplib`；**未配置时验证码 `print` 到后端控制台**（本地开发兜底）。
+
+**鉴权依赖**：`auth/deps.py` `get_current_user`（`HTTPBearer(auto_error=False)`，统一抛 401）。`main.py` 里 `include_router(..., dependencies=[Depends(get_current_user)])` 挂到除 auth 外全部路由；端点内再次 `Depends(get_current_user)` 命中请求内缓存，只查一次库。SSE 端点鉴权在流建立前完成，闭包只捕获 `uid: int`。
+
+**数据隔离**：
+- 对话/面试会话：`_session_path` 加 `user_id` 维度 → `sessions/{uid}/`。越权防护靠路径而非校验（拿他人 session_id 拼到自己目录，读=空、删=0）。面试 session_id 改 `secrets.token_urlsafe` 强随机。
+- evaluate / jd：加 `user_id` 列，全部查询按用户过滤；越权查详情返回 404。`card/overview` 的 evals/平均分按用户，知识/术语保持全局。
+- 用户私有模型配置：`GET/PUT /api/user/llm`；api_key Fernet 加密落库，读接口只回脱敏值（`sk-a***wxyz`），绝不回明文。
+
+**关键坑**：`Base.metadata.create_all` 不给已存在表补列，`scripts/init_db.py` 用 `ensure_column` 对 evaluate/jd 补 `user_id`（幂等）。改密踢下线靠 `token_ver`。Fernet 解密失败返回空串（视为未配置自定义模型），不让对话接口 500。
 
 ---
 
@@ -319,9 +360,15 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 | 卡片 | GET | `/api/card/today` | 每日学习卡片（阶段 7.5） |
 | JD 分析 | POST | `/api/jd/analyze` | 上传 JD 截图 → OCR → 技术栈提取（阶段 8） |
 | JD 分析 | GET | `/api/jd/{jd_id}` / `/api/jd/` | 单条结果 / 记录列表（阶段 8） |
-| 评估 | GET | `/api/evaluate/` | 评分记录列表，可按 topic 过滤（阶段 9） |
-| 评估 | GET | `/api/evaluate/stats` | 聚合统计：总条数/平均分/各主题掌握情况（阶段 9） |
-| 评估 | GET | `/api/evaluate/{id}` | 单条评分详情（阶段 9） |
+| 评估 | GET | `/api/evaluate/` | 评分记录列表，可按 topic 过滤（阶段 9，按用户隔离） |
+| 评估 | GET | `/api/evaluate/stats` | 聚合统计：总条数/平均分/各主题掌握情况（阶段 9，按用户） |
+| 评估 | GET | `/api/evaluate/{id}` | 单条评分详情（阶段 9，越权返 404） |
+| 鉴权 | POST | `/api/auth/send-code` | 发送邮箱验证码（注册/重置，免鉴权） |
+| 鉴权 | POST | `/api/auth/register` | 邮箱验证码注册，返回 token（免鉴权） |
+| 鉴权 | POST | `/api/auth/login` | 登录，返回 token（免鉴权） |
+| 鉴权 | POST | `/api/auth/reset` | 忘记密码：验证码重置密码，旧 token 失效（免鉴权） |
+| 鉴权 | GET | `/api/auth/me` | 当前用户信息（token 探活） |
+| 用户 | GET/PUT | `/api/user/llm` | 读/存当前用户私有模型配置（api_key 加密+脱敏返回） |
 
 ---
 
@@ -355,9 +402,23 @@ CHAT_PROVIDER=auto            # openai / anthropic / auto（按地址识别）
 OCR_MODEL=Qwen/Qwen3-VL-32B-Instruct
 OCR_BASE_URL=                 # 留空复用 CHAT_BASE_URL
 OCR_KEY=                      # 留空复用 CHAT_KEY
+
+# 用户鉴权（阶段 11）
+AUTH_SECRET_KEY=...           # JWT 签名 + api_key 加密派生源，必填！生成：
+                              #   python -c "import secrets;print(secrets.token_urlsafe(48))"
+AUTH_TOKEN_TTL_MIN=1440       # token 有效期（分钟），默认 24h
+FERNET_KEY=                   # 留空则由 AUTH_SECRET_KEY 派生
+
+# 验证码邮件（SMTP 未配置时验证码只打印到后端控制台，便于本地开发）
+SMTP_HOST=                    # 如 smtp.qq.com
+SMTP_PORT=465
+SMTP_USE_SSL=true
+SMTP_USER=                    # SMTP 登录账号（一般即发件邮箱）
+SMTP_PASSWORD=                # SMTP 授权码（非邮箱登录密码）
+SMTP_FROM=                    # 留空用 SMTP_USER
 ```
 
-至此 `.env` 所需配置已全部就位，无后续规划项。
+至此 `.env` 所需配置已全部就位。注：本地 `REDIS_PORT` 因 6379 落在 Windows Hyper-V 保留端口段（6346–6445）无法监听而改用 6500；服务器部署无此限制，可用 6379。
 
 ---
 
@@ -391,3 +452,5 @@ uv run python scripts/run_spider.py -w 3 --reset   # 3 个 worker，全量重爬
 3. **密钥安全**：`.env` 里有真实密钥，确认 `.gitignore` 已忽略，切勿提交。
 4. **大小写**：现目录 `DAO/` 与飞书架构的 `dao/` 不一致，暂保留，大整理时统一。
 5. **Milvus Lite 单进程独占**：配置了 `MILVUS_LITE_PATH` 时，同一个 `.db` 文件同一时刻只能被一个进程打开（官方不支持多进程并发，见 milvus-lite issue #195/#264）。后端运行时不要另起进程跑 `vectorize.py`，否则后来者会报 `Fail connecting to server on 127.0.0.1:<随机端口>`（该端口是 Milvus Lite 拉起的本地子进程，不在任何配置里）。正确姿势：停后端再跑离线脚本，或直接用后端内置的 `POST /api/embedding/run`（进程内执行，无冲突）。`vectorize.py` 已内置后端存活检测；`deploy/setup.sh` 已改为「先向量化、后启后端」。另外混合检索已做降级：向量路不可用时自动退化为纯 BM25，对话不整体失败；`VectorStore` 为进程级单例（`get_vector_store()`），勿改回每请求新建。
+6. **阶段 11 会话目录迁移**：对话/面试会话改存 `sessions/{user_id}/` 子目录；`sessions/` 根目录下旧的 `{sid}_{mode}.json` 为鉴权前数据，作废不再读取（可手工清理）。鉴权前的 evaluate / jd 行 `user_id=NULL`，同样作废。
+7. **本地 Redis 端口**：本机 6379 落在 Windows Hyper-V 保留端口段内无法监听，`.env` 用 `REDIS_PORT=6500`（Redis 跑在 WSL）；`deploy/` 服务器部署可用默认 6379，勿照搬本地端口。

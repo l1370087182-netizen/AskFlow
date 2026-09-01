@@ -6,8 +6,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
     
 def create_app():
-    from fastapi import FastAPI
+    from fastapi import Depends, FastAPI
     from fastapi.middleware.cors import CORSMiddleware
+    from auth.deps import get_current_user
     from controller.konwledge_controller import router as knowledge_router
     from controller.embedding_controller import router as embedding_router
     from controller.retrieval_controller import router as retrieval_router
@@ -16,6 +17,8 @@ def create_app():
     from controller.jd_controller import router as jd_router
     from controller.evaluate_controller import router as evaluate_router
     from controller.interview_controller import router as interview_router
+    from controller.auth_controller import router as auth_router
+    from controller.user_controller import router as user_router
 
     app = FastAPI(title="智能问答系统（学习版）")
 
@@ -32,14 +35,22 @@ def create_app():
     async def read_root():
         return {"message": "Hello from rag!"}
 
-    app.include_router(knowledge_router)
-    app.include_router(embedding_router)
-    app.include_router(retrieval_router)
-    app.include_router(chat_router)
-    app.include_router(card_router)
-    app.include_router(jd_router)
-    app.include_router(evaluate_router)
-    app.include_router(interview_router)
+    # 鉴权：仅注册/登录/验证码接口免登录，其余全部要求 Bearer token
+    app.include_router(auth_router)
+
+    _auth = [Depends(get_current_user)]
+    for r in (
+        knowledge_router,
+        embedding_router,
+        retrieval_router,
+        chat_router,
+        card_router,
+        jd_router,
+        evaluate_router,
+        interview_router,
+        user_router,
+    ):
+        app.include_router(r, dependencies=_auth)
     return app
 
 
