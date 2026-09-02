@@ -134,7 +134,12 @@ def _chat_teach(
         # 检索参考答案：藏进系统提示当「标准答案」，不直接展示给用户
         # 个人知识库：费曼选题同样能选到本人的个人知识
         results = chain.retriever.search(topic, top_k=5, uid=uid)
-        meta.update({"topic": topic, "reference": format_context(results), "rounds": 0})
+        reference = format_context(results)
+        # 术语兜底：语料检索不到时用术语卡片垫底，参考答案不至于全空
+        term_card = chain.term_context(topic, uid)
+        if term_card:
+            reference += "\n\n" + term_card
+        meta.update({"topic": topic, "reference": reference, "rounds": 0})
         save_session(uid, body.session_id, "teach", session)
 
         if not body.topic:

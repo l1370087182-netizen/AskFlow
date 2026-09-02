@@ -3,10 +3,13 @@
 讲解模式：每条消息都即时检索（问题即查询）；传入 llm 且编排开关开启时
 走编排检索（多查询改写+融合，见 retrieval_orchestrator，全程可降级）。
 费曼模式：只在选题时检索一次，结果作为「参考答案」藏进系统提示，不直接展示。
+术语兜底：tech_term（卡片数据源）与 knowledge 语料是两条独立链路，术语常常
+「卡片里有、语料里没有」——消息里命中术语时，把术语卡片一并拼进上下文。
 """
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy.orm import Session
 
@@ -38,11 +41,56 @@ def format_context(results: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def format_term_card(term) -> str:
+    """术语 → 参考片段里的【术语卡片】文本块（tech_term 表的兜底内容）"""
+    lines = []
+    head = f"【术语卡片】{term.term}"
+    if term.alias:
+        head += f"（别名：{term.alias}）"
+    lines.append(head)
+    if term.brief:
+        lines.append(f"一句话简介：{term.brief}")
+    if term.detail:
+        lines.append(f"详细讲解：{term.detail}")
+    if term.example:
+        lines.append(f"示例：{term.example}")
+    if term.source_url:
+        lines.append(f"来源：{term.source_url}")
+    return "\n".join(lines)
+
+
 class ChainBuilder:
     """负责把提示词、历史、检索结果组装成最终 messages"""
 
     def __init__(self, db: Session, retriever: HybridRetriever | None = None):
+        self.db = db
         self.retriever = retriever or HybridRetriever(db)
+
+    # ---------- 术语兜底 ----------
+
+    def match_term(self, message: str, uid: int = 0):
+        """在消息里找用户可见的术语（词边界匹配，防 'ai' 误伤 'main'）。
+
+        多个术语同时命中时取名字最长的（更具体），如「依赖注入」优先于「注入」。
+        """
+        from DAO.tech_term_dao import TechTermDAO  # 延迟导入，与 user_dao 同理
+
+        msg = message.lower()
+        best = None  # (名字长度, term)
+        for t in TechTermDAO(self.db).list_visible(uid):
+            names = [t.term] + [a.strip() for a in (t.alias or "").split(",")]
+            for name in names:
+                if not name:
+                    continue
+                if re.search(rf"(?<![0-9a-z]){re.escape(name.lower())}(?![0-9a-z])", msg):
+                    if best is None or len(name) > best[0]:
+                        best = (len(name), t)
+        return best[1] if best else None
+
+    def term_context(self, message: str, uid: int = 0) -> str:
+        """消息命中术语时返回「术语卡片」文本块（拼进参考片段末尾），否则空串"""
+        term = self.match_term(message, uid)
+        return format_term_card(term) if term else ""
 
     # ---------- 讲解模式 ----------
 
@@ -62,7 +110,12 @@ class ChainBuilder:
         :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源
         """
         results = self._search_ask(message, top_k, uid, llm)
-        system = ASK_SYSTEM_PROMPT.format(context=format_context(results))
+        context = format_context(results)
+        # 术语兜底：卡片里有、语料里没有的知识，用术语卡片垫上
+        term_card = self.term_context(message, uid)
+        if term_card:
+            context += "\n\n" + term_card
+        system = ASK_SYSTEM_PROMPT.format(context=context)
         messages = (
             [{"role": "system", "content": system}]
             + history

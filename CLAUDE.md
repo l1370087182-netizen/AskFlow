@@ -17,7 +17,7 @@
 4. **对话学习**（两种模式）：
    - **讲解模式（问）**：我发 `aigc`，AI 当老师，基于知识库把我讲明白
    - **费曼模式（教）**：我发 `aigc`，AI 变学生，我当老师讲给它听；它负责追问、挑毛病、最后总结并给我的讲解打分
-5. **每日学习卡片**：主页每天随机展示一个技术知识点，碎片化学习
+5. **学习卡片**：主页展示一个技术知识点，点「换一个」手动刷新（原为每日自动换，2026-09 改），碎片化学习
 
 ---
 
@@ -28,7 +28,7 @@
 | Web 框架 | FastAPI + uvicorn | 对外接口、流式响应 |
 | 参数校验/配置 | pydantic / pydantic-settings | DTO（schema）、`.env` 全局配置 |
 | 关系库 | MySQL + SQLAlchemy + PyMySQL | 知识原始数据、会话/卡片等业务记录 |
-| 缓存/队列 | Redis | 爬虫任务队列、URL 去重、每日卡片缓存 |
+| 缓存/队列 | Redis | 爬虫任务队列、URL 去重、学习卡片缓存 |
 | 爬虫 | httpx + BeautifulSoup + lxml | 抓取、解析、扩链 |
 | 向量库 | Milvus（pymilvus） | 向量存储与 ANN 检索 |
 | Embedding | BAAI/bge-m3（OpenAI 兼容接口） | 文本向量化（1024 维） |
@@ -49,7 +49,7 @@
                                                      │ 切块 + Embedding
                                                      ▼
   ┌────────────┐     ┌──────────────┐     ┌─────────────────────┐
-  │ 每日学习卡片 │ ◀── │ 知识/术语     │     │ Milvus 向量库        │
+  │ 学习卡片    │ ◀── │ 知识/术语     │     │ Milvus 向量库        │
   └────────────┘     └──────────────┘     └──────────┬──────────┘
                                                      │
         用户提问/讲解 ──▶ BM25 + 向量混合检索 ──▶ Rerank ──▶ LLM 生成
@@ -69,7 +69,7 @@ project/
 ├── sessions/                # 会话目录（用户对话历史）
 ├── storage/                 # 存储目录（JD截图、临时文件）
 ├── frontend/                # 前端静态站（原生 HTML/CSS/JS，10001 端口）
-│   ├── index.html           # 主页：每日学习卡片
+│   ├── index.html           # 主页：学习卡片
 │   ├── chat.html            # 对话页：讲解/费曼双模式
 │   ├── kb.html              # 知识库页：分类聚合+条目列表+正文弹窗
 │   ├── interview.html       # 模拟面试页：双图上传+逐轮追问
@@ -86,7 +86,7 @@ project/
     │   ├── knowledge_controller.py # 知识库+上传（现为 konwledge_controller.py）✅
     │   ├── embedding_controller.py # 触发向量化流水线 ✅
     │   ├── retrieval_controller.py # 混合检索调试 ✅
-    │   ├── card_controller.py      # 每日学习卡片 ✅
+    │   ├── card_controller.py      # 学习卡片（手动刷新） ✅
     │   ├── jd_controller.py        # JD分析接口 ✅
     │   ├── evaluate_controller.py  # 知识点评估接口 ✅
     │   ├── chat_controller.py      # 问答接口（讲解/费曼双模式）✅
@@ -203,7 +203,7 @@ project/
 | 5 | 切块 + 向量化 + Milvus | ✅ 完成 | `milvus/ingestion/` 五件套 + `POST /api/embedding/run`，4700+ 块入库，幂等重跑 |
 | 6 | 检索（BM25→向量→混合→Rerank） | ✅ 完成 | `milvus/retrieval/` 四件套 + `POST /api/retrieval/search`，RRF 融合 |
 | 7 | LLM 双模式问答（流式+记忆） | ✅ 完成 | `generation/` + `chat_controller.py`，讲解/费曼双模式 + sessions 记忆 |
-| 7.5 | 每日学习卡片 | ✅ 完成 | `tech_term` 表 + `GET /api/card/today`，Redis 按日期缓存 + 日期种子（飞书原计划无，新增需求） |
+| 7.5 | 学习卡片 | ✅ 完成 | `tech_term` 表 + `GET /api/card/today` + `POST /api/card/refresh`（手动刷新「换一个」，原每日缓存制已于 2026-09 移除）；对话链路有术语卡片兜底 |
 | 8 | JD 分析（OCR+技术栈） | ✅ 完成 | `ocr/ocr_client.py`（视觉模型读图）+ `jd_analyzer/`（LLM 提炼结构化技术栈）+ `/api/jd/*` |
 | 9 | 知识点评估 | ✅ 完成 | `evaluate/`（解析+评分规则）+ evaluate 表 + `/api/evaluate/*`，与费曼评分联动落库 |
 | 10 | 前端 | ✅ 完成 | 原生 HTML/CSS/JS：主页（每日卡片+跳转）+ 对话页（双模式切换、SSE 流式、评分卡片），端口 10001 |
@@ -305,14 +305,16 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
   - OpenAI 风格的 `messages`（含 system 角色）发给 Anthropic 时自动转换：system 抽成独立参数、连续同角色消息合并（费曼结束轮有连续 user）、`max_tokens` 必填、新 Claude 模型不接受 `temperature` 故 anthropic 路径不传
 - 新增依赖：`anthropic`（官方 SDK）；本地无 Claude 密钥时可用 `scripts/mock_anthropic_server.py` 起 mock 服务验证 anthropic 路径
 
-### 7.5 每日学习卡片（阶段 7.5）
+### 7.5 学习卡片（阶段 7.5，原「每日卡片」——2026-09 改手动刷新）
 
-- 数据源：`tech_term` 表
-- 接口：`GET /api/card/today`
-  - Redis key：`daily:card:YYYY-MM-DD`
-  - 命中 → 直接返回；未命中 → 随机抽一条（用日期做随机种子，保证当天稳定）→ 写回 Redis，过期时间设到当天 24:00
-- 同一天多次刷新卡片内容不变；换天自动换新
-- 前端主页卡片展示：术语 + 一句话简介 + 「去问 AI」跳转按钮
+- 数据源：`tech_term` 表（全局术语 + 本人个人术语）
+- 接口：`GET /api/card/today`（当前卡片）+ `POST /api/card/refresh`（换一个）
+  - Redis key：`card:current:v1:{user_id}`（**无 TTL**：卡片常驻，不按天换）
+  - today 命中 → 直接返回；未命中 → 随机抽一条写回
+  - refresh → 排除当前这张随机换新（只剩一张时原样返回）
+- 重进主页看到的还是上一次那张，点「换一个」才换
+- **术语兜底（卡片 → 对话联动）**：讲解模式每条消息、费曼模式选题时，都会在消息里做术语匹配（词边界正则，命中多个取名字最长的），命中就把 `tech_term` 的 brief/detail/example 以【术语卡片】块拼进参考片段——术语表与 knowledge 语料是两条独立链路，此联动保证「卡片里有的知识，问 AI 不至于答知识库没有」。见 `generation/chain.py` 的 `match_term`/`term_context`
+- 前端主页卡片展示：术语 + 一句话简介 + 「换一个」按钮 + 「去问 AI」跳转按钮
 
 ### 7.6 用户鉴权与数据隔离（阶段 11，重点）
 
@@ -357,7 +359,8 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 | 对话 | DELETE | `/api/chat/sessions/{id}` | 删除会话 |
 | 面试 | POST | `/api/interview/start` | 上传 JD+简历截图 → OCR → 分析 → 首问（模拟面试） |
 | 面试 | POST | `/api/interview/answer` | SSE 逐轮点评+追问；结束→总评+推荐学习卡片 |
-| 卡片 | GET | `/api/card/today` | 每日学习卡片（阶段 7.5） |
+| 卡片 | GET | `/api/card/today` | 当前学习卡片（手动刷新制） |
+| 卡片 | POST | `/api/card/refresh` | 换一张卡片（排除当前这张随机换） |
 | JD 分析 | POST | `/api/jd/analyze` | 上传 JD 截图 → OCR → 技术栈提取（阶段 8） |
 | JD 分析 | GET | `/api/jd/{jd_id}` / `/api/jd/` | 单条结果 / 记录列表（阶段 8） |
 | 评估 | GET | `/api/evaluate/` | 评分记录列表，可按 topic 过滤（阶段 9，按用户隔离） |

@@ -1,15 +1,12 @@
-"""每日学习卡片接口：GET /api/card/today（阶段 7.5）
+"""学习卡片接口：GET /api/card/today + POST /api/card/refresh（手动刷新）
 
-流程（对应 CLAUDE.md §7.5）：
-    Redis key daily:card:v3:{user_id}:YYYY-MM-DD
-      命中 → 直接返回
-      未命中 → 用日期做随机种子从「全局+本人」术语抽一条（同一天结果稳定）
-             → 写回 Redis，过期时间设到当天 24:00
-    术语用户化后缓存键带 user_id：个人术语只进本人卡片。
+卡片不再按天自动更换（原「每日卡片」）：Redis 只存「当前卡片」
+（key 无 TTL），重进主页看到的还是上一次那张；用户点「换一个」
+（POST /refresh）才排除当前这张随机换新。抽取范围 = 全局术语 +
+本人个人术语（个人术语只进本人卡片）。
 """
 import json
 import random
-from datetime import date, datetime, timedelta
 
 import redis
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +18,7 @@ from database.session import get_db
 from model.TechTermModel import TechTermModel
 from util.redis_util import make_redis
 
-router = APIRouter(prefix="/api/card", tags=["每日卡片"])
+router = APIRouter(prefix="/api/card", tags=["学习卡片"])
 
 
 def _redis() -> redis.Redis:
@@ -29,25 +26,14 @@ def _redis() -> redis.Redis:
     return make_redis()
 
 
-def pick_card(terms: list[TechTermModel], date_str: str) -> TechTermModel:
-    """用日期做随机种子抽一条——同一天多次调用结果必然一致"""
-    rng = random.Random(date_str)
-    return rng.choice(terms)
+def _card_key(uid: int) -> str:
+    """当前卡片缓存键（无 TTL：卡片常驻，换卡只由用户手动触发）"""
+    return f"card:current:v1:{uid}"
 
 
-def _seconds_until_midnight() -> int:
-    """距离当天 24:00 的秒数（卡片缓存的 TTL）"""
-    now = datetime.now()
-    midnight = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return max(int((midnight - now).total_seconds()), 60)
-
-
-def _to_card(term: TechTermModel, date_str: str) -> dict:
+def _to_card(term: TechTermModel) -> dict:
     """卡片响应结构：术语 + 别名 + 简介 + 详细讲解 + 示例 + 来源"""
     return {
-        "date": date_str,
         "term": term.term,
         "alias": term.alias,
         "category": term.category,
@@ -56,6 +42,29 @@ def _to_card(term: TechTermModel, date_str: str) -> dict:
         "example": term.example,
         "source_url": term.source_url,
     }
+
+
+def _pick_term(db: Session, uid: int, exclude: str | None = None) -> TechTermModel:
+    """从用户可见术语里随机抽一条；exclude 排除当前这张（只剩一张时原样返回）"""
+    terms = TechTermDAO(db).list_visible(uid)
+    if not terms:
+        raise HTTPException(
+            status_code=404,
+            detail="还没有术语数据，请先运行 scripts/seed_terms.py 灌种子",
+        )
+    pool = [t for t in terms if t.term != exclude]
+    return random.choice(pool or terms)
+
+
+def _load_cached(r: redis.Redis, uid: int) -> dict | None:
+    """读当前卡片缓存；缓存内容损坏时视为未命中（换一张覆盖掉）"""
+    cached = r.get(_card_key(uid))
+    if not cached:
+        return None
+    try:
+        return json.loads(cached)
+    except json.JSONDecodeError:
+        return None
 
 
 @router.get("/overview")
@@ -102,33 +111,28 @@ def overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
 
 @router.get("/today")
 def today_card(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """今日学习卡片：同一天多次刷新内容不变，换天自动换新。
+    """当前学习卡片：手动刷新制——重进页面不换卡，点「换一个」才换。
 
     抽取范围 = 全局术语 + 本人个人术语（个人术语由知识爬取的
     curator Agent 提炼，仅本人可见）。
     """
-    today = date.today().isoformat()
-    # v3：缓存键加用户维度（个人术语只进本人卡片）
-    key = f"daily:card:v3:{user.id}:{today}"
     r = _redis()
-
-    # 1) 缓存命中直接返回
-    cached = r.get(key)
+    cached = _load_cached(r, user.id)
     if cached:
-        return json.loads(cached)
+        return cached
 
-    # 2) 未命中：日期种子抽卡（同一天同一用户结果稳定）
-    dao = TechTermDAO(db)
-    terms = dao.list_visible(user.id)
-    if not terms:
-        raise HTTPException(
-            status_code=404,
-            detail="还没有术语数据，请先运行 scripts/seed_terms.py 灌种子",
-        )
+    card = _to_card(_pick_term(db, user.id))
+    r.set(_card_key(user.id), json.dumps(card, ensure_ascii=False))
+    return card
 
-    seed = f"{user.id}:{today}"  # 用户+日期共同作种子，各人卡片可不同
-    card = _to_card(pick_card(terms, seed), today)
 
-    # 3) 写回 Redis，过期时间到当天 24:00
-    r.set(key, json.dumps(card, ensure_ascii=False), ex=_seconds_until_midnight())
+@router.post("/refresh")
+def refresh_card(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """换一张卡片：排除当前这张随机换新（只剩一张时原样返回）"""
+    r = _redis()
+    current = _load_cached(r, user.id)
+    exclude = current.get("term") if current else None
+
+    card = _to_card(_pick_term(db, user.id, exclude))
+    r.set(_card_key(user.id), json.dumps(card, ensure_ascii=False))
     return card

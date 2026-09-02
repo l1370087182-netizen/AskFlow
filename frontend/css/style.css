@@ -55,7 +55,7 @@ a { color: var(--brand); text-decoration: none; }
 
 .container { max-width: 960px; margin: 0 auto; padding: 28px 20px 60px; }
 
-/* ---------- 主页：每日卡片 ---------- */
+/* ---------- 主页：学习卡片 ---------- */
 .home-hero { text-align: center; margin: 18px 0 26px; }
 .home-hero h1 { font-size: 26px; letter-spacing: 1px; }
 .home-hero p { color: var(--ink-2); margin-top: 6px; font-size: 14px; }
@@ -80,11 +80,15 @@ a { color: var(--brand); text-decoration: none; }
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 10px;
 }
-.daily-card .date-badge {
-  display: inline-block; font-size: 12px; color: var(--ink-3);
+.daily-card .swap-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--ink-3);
   border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px;
-  background: #fff;
+  background: #fff; cursor: pointer;
+  transition: color .15s, border-color .15s;
 }
+.daily-card .swap-btn:hover { color: var(--brand); border-color: var(--brand); }
+.daily-card .swap-btn:disabled { opacity: .6; cursor: default; }
 .daily-card .term {
   font-size: 40px; font-weight: 800; letter-spacing: 0.5px;
   margin: 4px 0 2px;

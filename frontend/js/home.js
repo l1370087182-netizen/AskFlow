@@ -1,4 +1,4 @@
-// 主页逻辑：拉今日卡片 + 概览统计，跳转对话页
+// 主页逻辑：拉当前卡片 + 概览统计，跳转对话页
 
 let todayCard = null;
 
@@ -21,7 +21,6 @@ function renderCard(card) {
   document.getElementById('card-state').style.display = 'none';
   document.getElementById('daily-card').style.display = '';
 
-  document.getElementById('card-date').textContent = card.date;
   document.getElementById('card-term').textContent = card.term;
   document.getElementById('card-category').textContent = categoryLabel(card.category);
   document.getElementById('card-brief').textContent = card.brief || '（暂无简介）';
@@ -65,6 +64,22 @@ function renderOverview(o) {
   document.getElementById('stat-avg').textContent =
     o.eval_avg_score == null ? '-' : o.eval_avg_score;
 }
+
+// 换一张卡片：手动刷新（排除当前这张随机换），失败不打断当前卡片
+document.getElementById('btn-swap').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-swap');
+  btn.disabled = true;
+  try {
+    const card = await apiPostJson('/api/card/refresh', {});
+    todayCard = card;
+    renderCard(card);
+  } catch (e) {
+    btn.textContent = '换卡失败';
+    setTimeout(() => (btn.textContent = '🔄 换一个'), 1500);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // 跳转对话页：讲解模式带上问题自动开问；费曼模式带上主题自动开局
 document.getElementById('btn-ask').addEventListener('click', () => {
