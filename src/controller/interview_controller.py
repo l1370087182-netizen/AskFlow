@@ -29,7 +29,7 @@ from interview.prompts import (
 )
 from jd_analyzer.analyzer import JDAnalyzer
 from model.UserModel import UserModel
-from ocr.ocr_client import OCRClient
+from ocr.ocr_client import OCRClient, build_ocr_client_for_user
 from util.session_store import load_session, save_session
 
 router = APIRouter(prefix="/api/interview", tags=["模拟面试"])
@@ -42,11 +42,11 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-def _ocr(file: UploadFile) -> str:
+def _ocr(file: UploadFile, client: OCRClient) -> str:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED:
         raise HTTPException(status_code=400, detail="仅支持 png/jpg/jpeg/webp/bmp 图片")
-    return OCRClient().recognize(file.file.read())
+    return client.recognize(file.file.read())
 
 
 def _system(jd_analysis: dict, resume: dict, rounds: int) -> str:
@@ -92,10 +92,11 @@ def start(
     """
     uid = user.id
 
-    # 1) OCR：视觉模型走服务端 OCR_* 配置（个人配置无法保证支持图片）
+    # 1) OCR：视觉模型优先用 ⚙️ 个人配置（与对话同源），未配置回退服务端 OCR_*
     try:
-        jd_text = _ocr(jd)
-        resume_text = _ocr(resume)
+        ocr_client = build_ocr_client_for_user(db, uid)
+        jd_text = _ocr(jd, ocr_client)
+        resume_text = _ocr(resume, ocr_client)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -103,7 +104,7 @@ def start(
             status_code=502,
             detail=(
                 f"截图文字识别（OCR）失败：{e}。"
-                "请检查服务端 .env 的 OCR_MODEL 是否为已开通的视觉模型"
+                "请确认 ⚙️ 个人模型（或服务端 OCR_MODEL）可用且支持图片输入"
             ),
         ) from e
     if not jd_text.strip():

@@ -16,7 +16,7 @@ from database.session import get_db
 from generation.llm import build_llm_for_user
 from jd_analyzer.analyzer import JDAnalyzer
 from model.UserModel import UserModel
-from ocr.ocr_client import OCRClient
+from ocr.ocr_client import OCRClient, build_ocr_client_for_user
 from schema.jd import JDAnalyzeResponse, JDItem, JDListResponse, TechStackItem
 
 router = APIRouter(prefix="/api/jd", tags=["JD分析"])
@@ -63,8 +63,8 @@ def analyze_jd(
     jd = dao.create(user_id=user.id, filename=filename, image_path=str(image_path))
 
     try:
-        # 3) OCR 识别截图文字
-        ocr = OCRClient()
+        # 3) OCR 识别截图文字（⚙️ 个人模型优先，未配置回退服务端 OCR_*）
+        ocr = build_ocr_client_for_user(db, user.id)
         ocr_text = ocr.recognize(image_bytes, mime=MIME_MAP[suffix])
         if not ocr_text.strip():
             raise HTTPException(status_code=422, detail="OCR 未识别出任何文字")
