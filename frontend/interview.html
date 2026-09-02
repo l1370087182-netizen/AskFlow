@@ -50,11 +50,41 @@
       <div class="input-bar" style="border:none;padding:10px 0 0">
         <div class="input-inner">
           <textarea id="iv-input" rows="1" placeholder="回答面试官的问题…"></textarea>
+          <button id="iv-undo" class="btn btn-ghost" title="撤回上一轮回答，原文回到输入框">↩ 撤回</button>
           <button id="iv-send" class="btn btn-primary">发送</button>
         </div>
       </div>
     </section>
+
+    <!-- 面试记录 -->
+    <section id="records-panel" class="daily-card" style="margin-top:20px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <b style="font-size:16px">📋 面试记录</b>
+        <span id="records-count" class="row-meta"></span>
+        <span style="flex:1"></span>
+        <button id="btn-refresh-records" class="btn btn-ghost btn-mini">刷新</button>
+      </div>
+      <p class="row-meta" style="margin-top:6px">每次面试的总评、薄弱点与缺口都会存档，可基于记录生成学习计划。</p>
+      <div id="records-list" style="margin-top:10px"></div>
+    </section>
   </main>
+
+  <!-- 面试记录详情弹窗 -->
+  <div id="record-modal" class="modal-mask" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="record-title">面试记录详情</h3>
+        <button id="record-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div id="record-meta" class="modal-meta"></div>
+      <div class="set-actions" style="margin:10px 0">
+        <button id="btn-gen-plan" class="btn btn-primary">生成学习计划</button>
+        <span id="plan-msg" class="auth-msg"></span>
+      </div>
+      <div id="plan-view" class="modal-body rich" style="display:none"></div>
+      <div id="record-body" class="modal-body rich"></div>
+    </div>
+  </div>
 
   <script src="js/api.js"></script>
   <script src="js/topbar-user.js"></script>

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from collections.abc import Generator
 from pathlib import Path
@@ -18,10 +19,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth.deps import get_current_user
+from DAO.agent_task_dao import AgentTaskDAO
+from DAO.jd_dao import JDDAO
 from DAO.tech_term_dao import TechTermDAO
 from database.session import SessionLocal, get_db
 from generation.llm import ChatLLM, build_llm_for_user
-from interview.analyzer import InterviewAnalyzer
+from interview.analyzer import InterviewAnalyzer, extract_weaknesses
+from model.AgentTaskModel import TaskKind
+from model.InterviewRecordModel import InterviewRecordModel
 from interview.prompts import (
     FINAL_ASSESS_PROMPT,
     FIRST_QUESTION_PROMPT,
@@ -126,13 +131,37 @@ def start(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"JD/简历分析失败：{e}") from e
 
+    # 3.5) JD 分析落库（复用 jd 表，面试记录用 jd_id 关联；失败不阻塞面试）
+    jd_id = None
+    try:
+        jd_row = JDDAO(db).create(user_id=uid, filename="interview_jd", image_path="")
+        JDDAO(db).save_result(
+            jd_row.id,
+            ocr_text=jd_text,
+            title=jd_analysis.get("title", ""),
+            summary=jd_analysis.get("summary", ""),
+            analysis_raw=str(jd_analysis),
+            tech_stack=jd_analysis.get("tech_stack", []),
+        )
+        jd_id = jd_row.id
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[interview] JD 分析落库失败（面试继续）：%s", e)
+
     # 强随机 id（弃用秒级时间戳，消除同秒碰撞；目录隔离后他人也无法访问）
     session_id = f"iv-{secrets.token_urlsafe(12)}"
     save_session(
         uid,
         session_id,
         "interview",
-        {"messages": [], "meta": {"jd_analysis": jd_analysis, "resume": resume, "rounds": 0}},
+        {
+            "messages": [],
+            "meta": {
+                "jd_analysis": jd_analysis,
+                "resume": resume,
+                "rounds": 0,
+                "jd_id": jd_id,
+            },
+        },
     )
 
     # 4) 首问生成
@@ -198,11 +227,32 @@ def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
                 for piece in llm.stream_chat(msgs, temperature=0.4):
                     out.append(piece)
                     yield _sse({"type": "token", "content": piece})
-                session["messages"].append({"role": "assistant", "content": "".join(out)})
+                final_text = "".join(out)
+                session["messages"].append({"role": "assistant", "content": final_text})
 
                 # 推荐学习卡片（JD required 且简历未覆盖）
                 gap = InterviewAnalyzer.compute_gap(jd_analysis, resume)
                 yield _sse({"type": "recs", "items": _recommend(gap, db)})
+
+                # 面试记录落库（学习规划/任务板的数据源；失败不阻塞收尾）
+                try:
+                    rec = InterviewRecordModel(
+                        user_id=uid,
+                        jd_id=meta.get("jd_id"),
+                        jd_title=jd_analysis.get("title", ""),
+                        rounds=rounds,
+                        final_summary=final_text,
+                        weaknesses=extract_weaknesses(final_text, llm),
+                        gap_topics=gap,
+                        resume_skills=resume.get("skills", []),
+                        transcript=session["messages"],
+                    )
+                    db.add(rec)
+                    db.commit()
+                    yield _sse({"type": "record", "record_id": rec.id})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[interview] 面试记录落库失败：%s", e)
+
                 save_session(uid, body.session_id, "interview", {"messages": [], "meta": {}})
                 yield _sse({"type": "done"})
                 return
@@ -233,3 +283,115 @@ def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------- 面试记录与学习计划 ----------
+
+def _get_record(db: Session, user_id: int, record_id: int) -> InterviewRecordModel:
+    """面试记录属主校验：越权/不存在一律 404（隐藏存在性）"""
+    rec = (
+        db.query(InterviewRecordModel)
+        .filter(InterviewRecordModel.id == record_id)
+        .first()
+    )
+    if not rec or rec.user_id != user_id:
+        raise HTTPException(status_code=404, detail="未找到该面试记录")
+    return rec
+
+
+@router.get("/records")
+def list_records(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """面试记录列表（仅本人，按时间倒序）"""
+    rows = (
+        db.query(InterviewRecordModel)
+        .filter(InterviewRecordModel.user_id == user.id)
+        .order_by(InterviewRecordModel.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "jd_title": r.jd_title,
+                "rounds": r.rounds,
+                "weaknesses": len(r.weaknesses or []),
+                "gaps": len(r.gap_topics or []),
+                "has_plan": bool(r.plan_task_id),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/records/{record_id}")
+def get_record(
+    record_id: int,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """面试记录详情（总评/弱项/缺口/逐轮，仅本人）"""
+    rec = _get_record(db, user.id, record_id)
+    return {
+        "id": rec.id,
+        "jd_title": rec.jd_title,
+        "rounds": rec.rounds,
+        "final_summary": rec.final_summary,
+        "weaknesses": rec.weaknesses or [],
+        "gap_topics": rec.gap_topics or [],
+        "resume_skills": rec.resume_skills or [],
+        "transcript": rec.transcript or [],
+        "plan_task_id": rec.plan_task_id,
+        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+    }
+
+
+@router.post("/records/{record_id}/plan")
+def request_plan(
+    record_id: int,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """为面试记录生成学习计划：发 study_plan 任务，PlannerAgent 异步执行。
+
+    幂等：该记录已有进行中/待认领的计划任务时直接复用，不重复派发。
+    """
+    rec = _get_record(db, user.id, record_id)
+    dao = AgentTaskDAO(db)
+
+    # 复用已有未完成的计划任务（幂等，防重复点击）
+    if rec.plan_task_id:
+        existing = dao.get(rec.plan_task_id)
+        if existing and existing.status in ("pending", "in_progress"):
+            return {"task_id": existing.id, "status": existing.status, "reused": True}
+
+    task = dao.create(
+        kind=TaskKind.STUDY_PLAN,
+        user_id=user.id,
+        payload={"interview_record_id": rec.id},
+        agent="api",
+    )
+    rec.plan_task_id = task.id
+    db.commit()
+    return {"task_id": task.id, "status": "pending", "reused": False}
+
+
+@router.get("/records/{record_id}/plan")
+def get_plan(
+    record_id: int,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """查询该记录的学习计划任务状态与结果"""
+    rec = _get_record(db, user.id, record_id)
+    if not rec.plan_task_id:
+        return {"status": "none", "output": None}
+    task = AgentTaskDAO(db).get(rec.plan_task_id)
+    if not task:
+        return {"status": "none", "output": None}
+    return {"status": task.status, "output": task.output or {}}

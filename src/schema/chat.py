@@ -43,6 +43,16 @@ class ChatRequest(BaseModel):
     )
 
 
+class UndoRequest(BaseModel):
+    """撤回上一轮消息：删除最后一组「用户消息+助手回复」，返回用户原文供回填。
+
+    mode 即会话文件的模式后缀：ask/teach 对话，interview 模拟面试。
+    """
+
+    session_id: str = Field(default="default", max_length=64)
+    mode: Literal["ask", "teach", "interview"] = Field(default="ask")
+
+
 class PingRequest(BaseModel):
     """模型连通性测试请求"""
 

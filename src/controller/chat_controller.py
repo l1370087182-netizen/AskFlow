@@ -15,7 +15,7 @@ from collections.abc import Generator
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,7 @@ from generation.chain import ChainBuilder, format_context
 from generation.llm import ChatLLM, build_llm_for_user
 from generation.prompts import FINISH_KEYWORDS, MAX_TEACH_ROUNDS
 from model.UserModel import UserModel
-from schema.chat import ChatRequest, LLMConfig, PingRequest
+from schema.chat import ChatRequest, LLMConfig, PingRequest, UndoRequest
 from util.session_store import (
     delete_session_files,
     list_user_session_files,
@@ -305,6 +305,38 @@ def history(
         "messages": session["messages"],
         "meta": safe_meta,
     }
+
+
+@router.post("/undo")
+def undo_message(body: UndoRequest, user: UserModel = Depends(get_current_user)):
+    """撤回上一轮：删除最后一组「用户消息 + 紧随的助手回复」，返回用户原文。
+
+    误触回车的补救：只撤这一轮，不动更早的历史；用户原文回填输入框续写。
+    费曼模式同步把轮次计数退回一格。会话为空/无可撤项返回 400。
+    """
+    session = load_session(user.id, body.session_id, body.mode)
+    msgs = session["messages"]
+
+    # 从尾部定位最后一条助手回复
+    ai_idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i].get("role") == "assistant":
+            ai_idx = i
+            break
+    # 助手回复前必须紧挨一条用户消息才构成可撤的「一问一答」
+    if ai_idx is None or ai_idx == 0 or msgs[ai_idx - 1].get("role") != "user":
+        raise HTTPException(status_code=400, detail="没有可撤回的消息")
+
+    restored = msgs[ai_idx - 1].get("content", "")
+    del msgs[ai_idx - 1 : ai_idx + 1]
+
+    # 费曼/面试会话带轮次计数，撤回同步退回一格
+    meta = session.get("meta", {})
+    if body.mode in ("teach", "interview") and isinstance(meta.get("rounds"), int) and meta["rounds"] > 0:
+        meta["rounds"] -= 1
+
+    save_session(user.id, body.session_id, body.mode, session)
+    return {"restored": restored, "remaining": len(msgs)}
 
 
 @router.post("/ping")

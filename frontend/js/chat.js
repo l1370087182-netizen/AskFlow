@@ -246,7 +246,7 @@ function switchSession(id) {
   teachRounds = 0;
   renderSessions();
   loadHistory();
-  input.focus();
+  // 不自动聚焦输入框：平板/手机聚焦会弹软键盘，等用户自己点输入框
 }
 
 function newSession() {
@@ -259,7 +259,7 @@ function newSession() {
   teachRounds = 0;
   renderSessions();
   applyModeUI();
-  input.focus();
+  // 不自动聚焦：新建会话后用户想输入自然会被动点输入框
 }
 
 async function deleteSession(id) {
@@ -317,6 +317,7 @@ async function send(text, opts = {}) {
   text = text.trim();
   streaming = true;
   btnSend.disabled = true;
+  btnUndo.disabled = true;
   input.value = '';
   pendingSources = [];
 
@@ -391,9 +392,46 @@ async function send(text, opts = {}) {
 
   streaming = false;
   btnSend.disabled = false;
+  btnUndo.disabled = false;
   refreshSessions();   // 首条消息后列表里出现标题
-  input.focus();
+  // 只有用户主动发送（此刻本就在打字）才保持聚焦；
+  // 卡片带参进入的自动发送（opts.auto）不聚焦——平板上会误弹软键盘
+  if (!opts.auto) input.focus();
 }
+
+// ---------- 撤回 ----------
+
+const btnUndo = document.getElementById('btn-undo');
+
+// 撤回上一轮：删掉最后「用户提问 + 助手回复」两条气泡，原文回填输入框续写
+async function undoLast() {
+  if (streaming) return;
+  const kids = [...msgList.children];
+  const aiEl = kids[kids.length - 1];
+  const userEl = kids[kids.length - 2];
+  btnUndo.disabled = true;
+  try {
+    const d = await apiPostJson('/api/chat/undo', { session_id: currentId, mode });
+    // 后端已删成功，前端同步 DOM（兜底校验：结构不符就整体重载历史）
+    if (aiEl && userEl && aiEl.classList.contains('ai') && userEl.classList.contains('user')) {
+      aiEl.remove();
+      userEl.remove();
+    } else {
+      await loadHistory();
+    }
+    input.value = d.restored || '';
+    if (mode === 'teach' && teachRounds > 0) {
+      teachRounds -= 1;   // 与后端 rounds 回退保持同步
+      applyModeUI();
+    }
+    // 不自动聚焦：用户要续写自然会被动点输入框（平板避免误弹键盘）
+  } catch (e) {
+    if (!String(e.message).includes('没有可撤回')) alert('撤回失败：' + e.message);
+    btnUndo.disabled = false;
+  }
+}
+
+btnUndo.addEventListener('click', undoLast);
 
 // ---------- 设置弹窗 ----------
 
@@ -523,9 +561,9 @@ async function boot() {
   refreshLLMState();
 
   if (mode === 'ask' && q) {
-    send(q);
+    send(q, { auto: true });
   } else if (mode === 'teach' && topic) {
-    send(topic);
+    send(topic, { auto: true });
   }
 }
 

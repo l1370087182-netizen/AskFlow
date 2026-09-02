@@ -1,16 +1,20 @@
-"""模拟面试分析器：简历结构化 + JD-简历差距计算。
+"""模拟面试分析器：简历结构化 + JD-简历差距计算 + 总评弱项解析。
 
 差距 = JD 要求（required）但简历没体现的技术 → 即「推荐学习」清单，
 不依赖答题质量，确定性强、可解释。
+弱项 = 总评「## 薄弱点」章节的条目（正则解析，失败才调模型兜底）。
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from generation.llm import ChatLLM
 
-from .prompts import RESUME_EXTRACT_PROMPT
+from .prompts import RESUME_EXTRACT_PROMPT, WEAKNESS_EXTRACT_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 class InterviewAnalyzer:
@@ -71,3 +75,57 @@ class InterviewAnalyzer:
                 continue
             gap.append(name)
         return gap
+
+
+# ---------- 总评弱项解析 ----------
+
+def extract_weaknesses(summary: str, llm: ChatLLM | None = None) -> list[str]:
+    """从总评文本解析薄弱知识点：正则解析「## 薄弱点」章节，失败才调模型兜底。
+
+    :return: 弱项主题列表（≤10 条，短句）
+    """
+    items = _parse_weakness_md(summary)
+    if items:
+        return items
+    if llm is None:
+        return []
+    try:
+        raw = llm.chat(
+            [{"role": "user", "content": WEAKNESS_EXTRACT_PROMPT + "\n\n" + summary[:4000]}],
+            temperature=0.1,
+        )
+        return _parse_weakness_json(raw)
+    except Exception as e:  # noqa: BLE001 —— 解析失败不影响面试结果落库
+        logger.warning("[interview] 弱项 LLM 兜底解析失败：%s", e)
+        return []
+
+
+def _parse_weakness_md(summary: str) -> list[str]:
+    """解析总评 Markdown 的「薄弱点」章节条目"""
+    m = re.search(r"##\s*薄弱点\s*\n(.*?)(?=\n##|\Z)", summary or "", re.S)
+    if not m:
+        return []
+    items = re.findall(r"^\s*[-*]\s+(.+?)\s*$", m.group(1), re.M)
+    return [i.strip(" .。·") for i in items if i.strip()][:10]
+
+
+def _parse_weakness_json(raw: str) -> list[str]:
+    """宽容解析模型兜底输出（["主题", ...] 或 {"weaknesses": [...]}）"""
+    t = (raw or "").strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+    candidates = [t]
+    start, end = t.find("["), t.rfind("]")
+    if start >= 0 and end > start:
+        candidates.append(t[start : end + 1])
+    for c in candidates:
+        try:
+            data = json.loads(c)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            data = data.get("weaknesses")
+        if isinstance(data, list):
+            out = [str(x).strip() for x in data if str(x).strip()]
+            return out[:10]
+    return []

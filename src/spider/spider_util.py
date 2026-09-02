@@ -50,7 +50,11 @@ def parse_article(html: str, url: str) -> dict:
         # 前端知识详情按围栏/启发式渲染时代码才有高亮排版。
         # 正文自带 ``` 的极端情况跳过，避免围栏嵌套破坏渲染
         for pre in main.find_all("pre"):
-            code_text = pre.get_text("\n").strip("\n")
+            # get_text() 必须不带分隔符：语法高亮的 <pre> 里每个 token 被
+            # <span> 包裹，若用 get_text("\n") 会把 token 逐个换行碎裂
+            # （rdb / := / redis / . / NewClient 一行一个）；
+            # 代码的真实换行在源码里是文本节点，get_text() 原样保留。
+            code_text = pre.get_text().strip("\n")
             if code_text and "```" not in code_text:
                 pre.replace_with(f"\n```\n{code_text}\n```\n")
         content = main.get_text("\n", strip=True)

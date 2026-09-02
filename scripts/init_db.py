@@ -19,6 +19,7 @@ import model.TechStackModel  # noqa: F401
 import model.EvaluateModel  # noqa: F401
 import model.UserModel  # noqa: F401
 import model.AgentTaskModel  # noqa: F401
+import model.InterviewRecordModel  # noqa: F401
 
 from database.session import init_db, engine
 from sqlalchemy import text
@@ -172,7 +173,7 @@ def main() -> None:
 
     # 抽查：表是否都存在
     with engine.connect() as conn:
-        for table in ("knowledge", "tech_term", "jd", "tech_stack", "evaluate", "user", "agent_task"):
+        for table in ("knowledge", "tech_term", "jd", "tech_stack", "evaluate", "user", "agent_task", "interview_record"):
             rows = conn.execute(text(f"SHOW TABLES LIKE '{table}'")).fetchall()
             if rows:
                 print(f"OK: 表 {table} 已存在")
