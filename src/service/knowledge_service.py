@@ -10,6 +10,9 @@
 - 活跃键   kb:crawl:active:{uid}     单用户单活跃任务，TTL 30 分钟，终态删
 - 消费队列 kb:crawl:queue            Redis List，提交 rpush、线程 blpop
 - 进程锁   kb:crawl:worker           SET NX EX 30，多进程部署的保险
+- 执行集合 kb:crawl:inflight         已出队未终态的任务 id 集合；任务被出队即
+                                     从队列移除，进程若此时死掉任务就悬空了，
+                                     靠它在启动时自检：心跳超时的重新入队续跑
 """
 from __future__ import annotations
 
@@ -63,11 +66,14 @@ TASK_KEY = "kb:crawl:task:{task_id}"     # 任务状态（JSON 整体覆写）
 ACTIVE_KEY = "kb:crawl:active:{uid}"     # 单用户活跃任务指针
 QUEUE_KEY = "kb:crawl:queue"             # 待消费任务队列（List）
 WORKER_KEY = "kb:crawl:worker"           # 多进程互斥锁（SET NX EX）
+INFLIGHT_KEY = "kb:crawl:inflight"       # 执行中任务 id 集合（出队未终态，中断恢复用）
+RECOVER_KEY = "kb:crawl:recover"         # 启动恢复互斥锁（防多进程重复入队）
 
 TASK_TTL_SEC = 7 * 24 * 3600             # 任务状态保留 7 天
 ACTIVE_TTL_SEC = 30 * 60                 # 活跃键兜底 30 分钟（正常终态即删）
 HEARTBEAT_TIMEOUT_SEC = 10 * 60          # heartbeat 超时 → 对外呈现 failed
 WORKER_LOCK_SEC = 30                     # worker 锁续期周期
+RECOVER_LOCK_SEC = 60                    # 恢复锁有效期（覆盖一次启动自检绰绰有余）
 
 # 本实例标识（多进程抢锁时区分持有者）
 _WORKER_INSTANCE = f"{socket.gethostname()}:{os.getpid()}"
@@ -216,6 +222,16 @@ def _save_task(r: redis.Redis, state: dict) -> None:
     )
 
 
+def _heartbeat(r: redis.Redis, state: dict) -> None:
+    """刷新心跳并立即持久化。
+
+    在每个阻塞步骤（抓页、AI 清洗、向量化）前后调用，
+    把「心跳静止」窗口压到单步耗时级，避免被误判为心跳丢失。
+    """
+    state["heartbeat"] = time.time()
+    _save_task(r, state)
+
+
 def _is_alive(state: dict) -> bool:
     """任务是否仍在有效推进：非终态且 heartbeat 未超时"""
     if state["status"] not in ("pending", "running"):
@@ -326,6 +342,7 @@ def start_crawl_worker() -> None:
     """幂等拉起常驻后台消费线程（main.py create_app 时调用）。
 
     daemon=True：随后端进程退出；模块级标记保证重复调用只起一条线程。
+    起线程前先自检：上次停机/崩溃中断的任务自动重新入队续跑。
     注意：uvicorn --reload 会起多进程，勿在开发模式使用本功能。
     """
     global _worker_started
@@ -333,9 +350,43 @@ def start_crawl_worker() -> None:
         if _worker_started:
             return
         _worker_started = True
+        _recover_interrupted_tasks()
         t = threading.Thread(target=_worker_loop, name="kb-crawl-worker", daemon=True)
         t.start()
         logger.info("[kb-crawl] 后台消费线程已启动（%s）", _WORKER_INSTANCE)
+
+
+def _recover_interrupted_tasks() -> None:
+    """启动自检：把随上一进程死掉的任务（已出队、非终态、心跳超时）重新入队。
+
+    任务被 blpop 出队后就只存在于执行进程里，进程一死就悬空——
+    不恢复的话只能等 10 分钟后被前端看到「心跳丢失」。
+    判死口径与 get_crawl_task 一致（心跳超时）；心跳仍新鲜的任务
+    （可能另一实例正在跑）不动。NX 锁防多进程同时启动重复入队。
+    恢复失败不阻塞 worker 启动。
+    """
+    try:
+        r = _redis()
+        if not r.set(RECOVER_KEY, _WORKER_INSTANCE, nx=True, ex=RECOVER_LOCK_SEC):
+            return
+        for task_id in r.smembers(INFLIGHT_KEY):
+            raw = r.get(TASK_KEY.format(task_id=task_id))
+            if not raw:
+                r.srem(INFLIGHT_KEY, task_id)  # 状态已过期，清残留标记
+                continue
+            state = json.loads(raw)
+            if state["status"] not in ("pending", "running"):
+                r.srem(INFLIGHT_KEY, task_id)  # 上进程已正常收尾，只清了标记
+                continue
+            if not _is_alive(state):
+                r.rpush(QUEUE_KEY, task_id)
+                r.srem(INFLIGHT_KEY, task_id)
+                logger.warning(
+                    "[kb-crawl] 检测到中断任务 %s（心跳超时），已重新入队续跑", task_id
+                )
+            # 心跳仍新鲜：可能另一实例正在执行，不动
+    except Exception:  # noqa: BLE001 —— 恢复失败不影响 worker 启动
+        logger.exception("[kb-crawl] 中断任务恢复失败")
 
 
 def _worker_loop() -> None:
@@ -350,6 +401,8 @@ def _worker_loop() -> None:
             if not item:
                 continue
             _, task_id = item
+            # 出队即标记执行中：此刻任务已不在队列，进程死掉就靠它启动时恢复
+            r.sadd(INFLIGHT_KEY, task_id)
             _run_task(task_id)
         except Exception:  # noqa: BLE001 —— 循环本体绝不上抛
             logger.exception("[kb-crawl] 消费循环异常")
@@ -378,14 +431,15 @@ def _run_task(task_id: str) -> None:
     """执行单个爬取任务：逐页 抓取→校验→AI清洗→upsert→即时向量化。
 
     独立 SessionLocal（后台线程不能用请求级 Session）；
-    无论成败，finally 里必写终态、释放活跃键与 worker 锁。
+    无论成败，finally 里必写终态、释放活跃键、执行集合与 worker 锁。
     """
     r = _redis()
     task_key = TASK_KEY.format(task_id=task_id)
 
     raw = r.get(task_key)
     if not raw:
-        return  # 任务已过期/不存在
+        r.srem(INFLIGHT_KEY, task_id)  # 任务已过期，清掉出队标记
+        return
     state = json.loads(raw)
     uid = state["uid"]
     active_key = ACTIVE_KEY.format(uid=uid)
@@ -394,6 +448,7 @@ def _run_task(task_id: str) -> None:
     if not _acquire_worker_lock(r):
         logger.warning("[kb-crawl] 未抢到 worker 锁，任务 %s 重新入队", task_id)
         r.rpush(QUEUE_KEY, task_id)
+        r.srem(INFLIGHT_KEY, task_id)  # 回到队列即算排队中，不再算执行中
         time.sleep(3)
         return
 
@@ -413,7 +468,7 @@ def _run_task(task_id: str) -> None:
         crawler = ShallowCrawler(max_pages=state["max_pages"])
         for page in crawler.iter_pages(state["url"]):
             state["current_url"] = page["url"]
-            state["heartbeat"] = time.time()
+            _heartbeat(r, state)
             _renew_worker_lock(r)
 
             if not page["ok"]:
@@ -439,7 +494,11 @@ def _run_task(task_id: str) -> None:
 
             # AI 清洗（失败自动回退原文）→ upsert → 即时向量化
             title = page.get("title") or page["url"]
+            # 阻塞步骤前后刷新心跳：清洗走用户模型（≤120s/次）、向量化走 Milvus，
+            # 慢调用不该被算进「心跳静止」窗口
+            _heartbeat(r, state)
             cleaned_text, cleaned = clean_page_content(llm, title, page["content"])
+            _heartbeat(r, state)
             row = KnowledgeDAO(db).upsert(
                 title=title,
                 content=cleaned_text,
@@ -450,6 +509,7 @@ def _run_task(task_id: str) -> None:
             )
             knowledge_id = row.id if row else None
             if row is not None and row.status == KnowledgeModel.STATUS_PENDING:
+                _heartbeat(r, state)
                 try:
                     IngestionPipeline(db).ingest_row(row)
                 except Exception:  # noqa: BLE001 —— 单页向量化失败不中断任务
@@ -481,12 +541,13 @@ def _run_task(task_id: str) -> None:
         state["status"] = "failed"
         state["error"] = f"任务执行异常：{e}"
     finally:
-        # 必达：写终态 + 释放活跃键（仅当仍指向本任务）+ 释放 worker 锁
+        # 必达：写终态 + 释放活跃键（仅当仍指向本任务）+ 移出执行集合 + 释放 worker 锁
         state["finished_at"] = time.time()
         try:
             _save_task(r, state)
             if r.get(active_key) == task_id:
                 r.delete(active_key)
+            r.srem(INFLIGHT_KEY, task_id)
         except Exception:  # noqa: BLE001
             logger.exception("[kb-crawl] 任务 %s 收尾失败", task_id)
         _release_worker_lock(r)
