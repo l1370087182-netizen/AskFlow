@@ -22,6 +22,7 @@ import redis
 from core.config import settings
 from DAO.knowledge_dao import KnowledgeDAO
 from model.KnowledgeModel import KnowledgeModel
+from util.redis_util import make_redis
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +45,8 @@ class TranslateError(Exception):
 
 
 def _redis() -> redis.Redis:
-    """Redis 客户端（与爬虫/卡片模块同一套连接配置）"""
-    return redis.Redis(
-        host=settings.REDIS_HOST,
-        port=settings.REDIS_PORT,
-        db=settings.REDIS_DB,
-        password=settings.REDIS_PASSWORD or None,
-        decode_responses=True,
-    )
+    """Redis 客户端（统一工厂：短超时+失败即抛，见 util/redis_util）"""
+    return make_redis()
 
 
 # ---------- 文本切分 ----------

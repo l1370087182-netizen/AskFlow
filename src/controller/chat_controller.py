@@ -84,8 +84,8 @@ def _chat_ask(
     """讲解模式：每条消息即时检索，基于片段流式回答"""
     session = load_session(uid, body.session_id, "ask")
 
-    # 个人知识库：检索全局块 + 本人个人块
-    messages, results = chain.build_ask(body.message, session["messages"], uid=uid)
+    # 个人知识库：检索全局块 + 本人个人块；传入 llm 启用编排检索（可降级）
+    messages, results = chain.build_ask(body.message, session["messages"], uid=uid, llm=llm)
 
     # 先把引用来源推给前端（片段对应的知识条目），再开始流式正文
     yield _sse(

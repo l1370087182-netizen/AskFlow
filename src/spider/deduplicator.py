@@ -1,6 +1,4 @@
-import redis
-from core.config import settings
-
+from util.redis_util import make_redis
 
 
 class URLDeduplicator:
@@ -8,13 +6,8 @@ class URLDeduplicator:
 
     def __init__(self, key: str="crawl:visited") -> None:
         self.key = key
-        self.r = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            password=settings.REDIS_PASSWORD or None,
-            decode_responses=True,
-        )
+        # 统一工厂：短超时+失败即抛（调用方有降级），见 util/redis_util
+        self.r = make_redis()
 
     def seen(self, url: str) -> bool:
         """检查URL是否已访问过"""

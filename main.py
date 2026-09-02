@@ -54,10 +54,10 @@ def create_app():
     ):
         app.include_router(r, dependencies=_auth)
 
-    # 个人知识库：幂等拉起爬取任务后台消费线程（模块级标记，daemon=True）。
-    # 注意：勿在 uvicorn --reload 下使用爬取功能（多进程会重复消费）
-    from service.knowledge_service import start_crawl_worker
-    start_crawl_worker()
+    # 任务引擎：幂等拉起 Producer Agent 池 + 超时回收器（含启动自检回收遗留任务）。
+    # 注意：勿在 uvicorn --reload 下使用（多进程会重复消费）
+    from agent_engine.manager import start_agent_engine
+    start_agent_engine()
     return app
 
 

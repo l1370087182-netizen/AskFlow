@@ -4,27 +4,18 @@
 """
 
 import redis
-from redis.backoff import NoBackoff
-from redis.retry import Retry
-from core.config import settings
 from typing import Any
 import json
+
+from util.redis_util import make_redis
 
 class TaskQueue:
     """爬虫任务队列"""
 
     def __init__(self, queue_key: str="crawl:queue") -> None:
         self.queue_key = queue_key
-        self.r = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            password=settings.REDIS_PASSWORD or None,
-            decode_responses=True,
-            # blpop 是阻塞命令，redis-py 默认的超时竞态 + 内部重试会把
-            # 5s 的等待放大到近 1 分钟。关掉内部重试，由 worker 外层循环负责重试
-            retry=Retry(NoBackoff(), 0),
-        )
+        # 统一工厂：短超时+失败即抛（blpop 的等待由 worker 外层循环负责）
+        self.r = make_redis()
 
     def ping(self) ->bool:
         """检查Redis连接"""

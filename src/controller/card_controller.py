@@ -15,23 +15,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from auth.deps import get_current_user
-from core.config import settings
 from DAO.tech_term_dao import TechTermDAO
 from database.session import get_db
 from model.TechTermModel import TechTermModel
+from util.redis_util import make_redis
 
 router = APIRouter(prefix="/api/card", tags=["每日卡片"])
 
 
 def _redis() -> redis.Redis:
-    """Redis 客户端（与爬虫模块同一套连接配置）"""
-    return redis.Redis(
-        host=settings.REDIS_HOST,
-        port=settings.REDIS_PORT,
-        db=settings.REDIS_DB,
-        password=settings.REDIS_PASSWORD or None,
-        decode_responses=True,
-    )
+    """Redis 客户端（统一工厂：短超时+失败即抛，见 util/redis_util）"""
+    return make_redis()
 
 
 def pick_card(terms: list[TechTermModel], date_str: str) -> TechTermModel:

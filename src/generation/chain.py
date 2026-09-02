@@ -1,12 +1,16 @@
 """Chain 组装：系统提示 + 会话历史 + 检索上下文 + 当前消息 → messages。
 
-讲解模式：每条消息都即时检索（问题即查询）。
+讲解模式：每条消息都即时检索（问题即查询）；传入 llm 且编排开关开启时
+走编排检索（多查询改写+融合，见 retrieval_orchestrator，全程可降级）。
 费曼模式：只在选题时检索一次，结果作为「参考答案」藏进系统提示，不直接展示。
 """
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from milvus.retrieval.hybird import HybridRetriever
 
 from .prompts import (
@@ -17,6 +21,8 @@ from .prompts import (
     TEACH_OPENING_PROMPT,
     TEACH_SYSTEM_PROMPT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def format_context(results: list[dict]) -> str:
@@ -46,13 +52,16 @@ class ChainBuilder:
         history: list[dict],
         top_k: int = 5,
         uid: int = 0,
+        llm=None,
     ) -> tuple[list[dict], list[dict]]:
         """组装讲解模式 messages：即时检索当前问题
 
         :param uid: 请求者用户；检索时全局块+本人个人块可见（个人知识库）
+        :param llm: 传入且编排开关开启时走编排检索（多查询改写+融合），
+                任何异常自动回退普通检索
         :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源
         """
-        results = self.retriever.search(message, top_k=top_k, uid=uid)
+        results = self._search_ask(message, top_k, uid, llm)
         system = ASK_SYSTEM_PROMPT.format(context=format_context(results))
         messages = (
             [{"role": "system", "content": system}]
@@ -60,6 +69,19 @@ class ChainBuilder:
             + [{"role": "user", "content": message}]
         )
         return messages, results
+
+    def _search_ask(self, message: str, top_k: int, uid: int, llm) -> list[dict]:
+        """讲解模式检索：编排开关开启且有 llm 时走编排器，否则普通检索"""
+        if llm is not None and settings.RETRIEVAL_ORCHESTRATOR:
+            try:
+                from generation.retrieval_orchestrator import RetrievalOrchestrator
+
+                return RetrievalOrchestrator(self.retriever, llm).search(
+                    message, top_k=top_k, uid=uid
+                )
+            except Exception as e:  # noqa: BLE001 —— 编排异常回退普通检索
+                logger.warning("[chain] 编排检索异常，回退普通检索：%s", e)
+        return self.retriever.search(message, top_k=top_k, uid=uid)
 
     # ---------- 费曼模式 ----------
 

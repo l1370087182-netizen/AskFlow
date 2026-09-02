@@ -1,34 +1,25 @@
-"""个人知识库服务：手工添加/编辑/删除 + 整站浅爬任务（Redis 状态 + 后台线程消费）。
+"""个人知识库服务：手工添加/编辑/删除 + 整站浅爬任务提交与查询。
 
 归属约定（与 knowledge.user_id 对齐）：
 - 手工条目占位 source_url = manual://{uid}/{16位hex}，source_type="personal"
 - 爬取条目 source_url = 真实页面 URL，source_type="personal"
 - 全部操作只影响 user_id=提交者 的行；全局语料（user_id=0）只读
 
-爬取任务状态存 Redis（后端重启不丢进度），后端进程内常驻调度线程 + 线程池并行消费：
-- 状态键   kb:crawl:task:{task_id}   TTL 7 天，每页整体覆写
-- 活跃集合 kb:crawl:active:{uid}     单用户活跃任务 SET（并行化后允许多任务），
-                                     终态移除；读取时剪枝过期/终态成员
-- 消费队列 kb:crawl:queue            Redis List，提交 rpush、调度线程 blpop 分发
-- 执行集合 kb:crawl:inflight         已出队未终态的任务 id 集合；任务被出队即
-                                     从队列移除，进程若此时死掉任务就悬空了，
-                                     靠它在启动时自检：心跳超时的重新入队续跑
-
-任务分发依赖 blpop 的原子性（一个任务只会被一个消费者取走），
-因此不再有全局执行锁；并行度由 CRAWL_WORKERS 控制。
+爬取任务的存储分工（任务引擎改造后）：
+- 生命周期 = agent_task 表（数据库是唯一真相源）：提交/认领/重试/终态
+  由任务引擎管理（见 agent_engine/ 与 agents/producer.py）
+- 逐页进度态 = Redis kb:crawl:task:{task_id}（前端进度面板的实时数据，
+  允许丢失——丢了只影响面板展示，不影响任务执行）
 """
 from __future__ import annotations
 
 import ipaddress
 import json
 import logging
-import os
 import re
 import secrets
 import socket
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from socket import getaddrinfo
 from urllib.parse import urlparse
 
@@ -36,15 +27,14 @@ import httpx
 import redis
 from bs4 import BeautifulSoup
 
-from core.config import settings
+from DAO.agent_task_dao import AgentTaskDAO
 from database.session import SessionLocal
-from DAO.knowledge_dao import KnowledgeDAO
 from generation.llm import build_llm_for_user
 from generation.prompts import AI_ADD_SYSTEM_PROMPT, CLEAN_SYSTEM_PROMPT
 from milvus.ingestion.pipeline import IngestionPipeline
+from model.AgentTaskModel import TaskKind, TaskStatus
 from model.KnowledgeModel import KnowledgeModel
-from spider.shallow_crawler import ShallowCrawler
-from spider.tech_spider import TechSpider
+from util.redis_util import make_redis
 
 logger = logging.getLogger(__name__)
 
@@ -65,23 +55,15 @@ REFUSAL_MARKERS = (
     "As an AI", "As a language model",
 )
 
-# ---- Redis 键与 TTL ----
-TASK_KEY = "kb:crawl:task:{task_id}"     # 任务状态（JSON 整体覆写）
-ACTIVE_KEY = "kb:crawl:active:{uid}"     # 单用户活跃任务集合（SET，允许多任务）
-QUEUE_KEY = "kb:crawl:queue"             # 待消费任务队列（List）
-INFLIGHT_KEY = "kb:crawl:inflight"       # 执行中任务 id 集合（出队未终态，中断恢复用）
-RECOVER_KEY = "kb:crawl:recover"         # 启动恢复互斥锁（防多进程重复入队）
+# ---- 进度态 Redis 键（生命周期在 agent_task 表，这里只存实时进度）----
+TASK_KEY = "kb:crawl:task:{task_id}"     # 任务进度态（JSON 整体覆写）
+TASK_TTL_SEC = 7 * 24 * 3600             # 进度态保留 7 天
 
-TASK_TTL_SEC = 7 * 24 * 3600             # 任务状态保留 7 天
-HEARTBEAT_TIMEOUT_SEC = 10 * 60          # heartbeat 超时 → 对外呈现 failed
-RECOVER_LOCK_SEC = 60                    # 恢复锁有效期（覆盖一次启动自检绰绰有余）
+# 前端视图的心跳超时（对外呈现 failed 用；引擎回收阈值见 agent_engine.reaper）
+HEARTBEAT_TIMEOUT_SEC = 10 * 60
 
-# ---- 并行度与上限 ----
-CRAWL_WORKERS = 3                        # 同时执行的爬取任务数（线程池大小）
-MAX_ACTIVE_PER_USER = 5                  # 单用户活跃（排队+执行）任务上限，超限 409
-
-# 本实例标识（多进程抢锁时区分持有者）
-_WORKER_INSTANCE = f"{socket.gethostname()}:{os.getpid()}"
+# 单用户活跃（排队+执行）爬取任务上限
+MAX_ACTIVE_PER_USER = 5
 
 
 class CrawlSubmitError(Exception):
@@ -95,14 +77,8 @@ class CrawlSubmitError(Exception):
 
 
 def _redis() -> redis.Redis:
-    """Redis 客户端（与爬虫/卡片模块同一套连接配置）"""
-    return redis.Redis(
-        host=settings.REDIS_HOST,
-        port=settings.REDIS_PORT,
-        db=settings.REDIS_DB,
-        password=settings.REDIS_PASSWORD or None,
-        decode_responses=True,
-    )
+    """Redis 客户端（统一工厂：短超时+失败即抛，见 util/redis_util）"""
+    return make_redis()
 
 
 # ---------- 手工条目 ----------
@@ -219,22 +195,12 @@ def validate_public_url(url: str) -> str:
 # ---------- 爬取任务：提交与查询 ----------
 
 def _save_task(r: redis.Redis, state: dict) -> None:
-    """任务状态整体覆写（每页一次），TTL 7 天"""
+    """进度态整体覆写（每页一次），TTL 7 天"""
     r.set(
         TASK_KEY.format(task_id=state["task_id"]),
         json.dumps(state, ensure_ascii=False),
         ex=TASK_TTL_SEC,
     )
-
-
-def _heartbeat(r: redis.Redis, state: dict) -> None:
-    """刷新心跳并立即持久化。
-
-    在每个阻塞步骤（抓页、AI 清洗、向量化）前后调用，
-    把「心跳静止」窗口压到单步耗时级，避免被误判为心跳丢失。
-    """
-    state["heartbeat"] = time.time()
-    _save_task(r, state)
 
 
 def _is_alive(state: dict) -> bool:
@@ -244,55 +210,15 @@ def _is_alive(state: dict) -> bool:
     return time.time() - state.get("heartbeat", 0) <= HEARTBEAT_TIMEOUT_SEC
 
 
-# ---------- 活跃任务集合（并行化：单用户多任务） ----------
-
-def _active_add(r: redis.Redis, uid: int, task_id: str) -> None:
-    try:
-        r.sadd(ACTIVE_KEY.format(uid=uid), task_id)
-    except redis.ResponseError:
-        # 旧版本单值键残留（WRONGTYPE）：删掉重建，旧键 30 分钟 TTL 内自然清完
-        r.delete(ACTIVE_KEY.format(uid=uid))
-        r.sadd(ACTIVE_KEY.format(uid=uid), task_id)
-
-
-def _active_remove(r: redis.Redis, uid: int, task_id: str) -> None:
-    try:
-        r.srem(ACTIVE_KEY.format(uid=uid), task_id)
-    except redis.ResponseError:
-        r.delete(ACTIVE_KEY.format(uid=uid))
-
-
-def _active_members(r: redis.Redis, uid: int) -> set:
-    try:
-        return r.smembers(ACTIVE_KEY.format(uid=uid))
-    except redis.ResponseError:
-        r.delete(ACTIVE_KEY.format(uid=uid))
-        return set()
-
-
-def _prune_active(r: redis.Redis, uid: int) -> list[dict]:
-    """读活跃集合并剪枝：状态过期/已终态的成员移出，返回存活任务状态列表。
-
-    剪枝时机即读取时机（提交查上限、进度恢复面板），无需额外定时器。
-    """
-    alive = []
-    for task_id in _active_members(r, uid):
-        state = get_crawl_task(uid, task_id)
-        if state is None or state["status"] not in ("pending", "running"):
-            _active_remove(r, uid, task_id)
-            continue
-        alive.append(state)
-    return alive
-
-
 def submit_crawl(
     db, *, uid: int, url: str, category: str, max_pages: int
 ) -> str:
-    """提交整站浅爬任务，返回 task_id。支持多任务并行（上限 MAX_ACTIVE_PER_USER）。
+    """提交整站浅爬任务：写入任务引擎（agent_task），由 ProducerAgent 并行消费。
 
+    :return: task_id（= agent_task.id）
     :raises CrawlSubmitError: 400（未配置模型/SSRF/URL 非法）或 409（活跃任务达上限）
     """
-    # 1) 清洗必须用用户自己的模型；未配置直接拒绝（不进队列）
+    # 1) 清洗必须用用户自己的模型；未配置直接拒绝（不建任务）
     if build_llm_for_user(db, uid) is None:
         raise CrawlSubmitError(
             400,
@@ -305,48 +231,58 @@ def submit_crawl(
     except ValueError as e:
         raise CrawlSubmitError(400, f"URL 不可用：{e}") from e
 
-    r = _redis()
-
-    # 3) 活跃任务上限（排队+执行中）；读取时顺带剪枝过期/终态成员
-    if len(_prune_active(r, uid)) >= MAX_ACTIVE_PER_USER:
+    # 3) 活跃任务上限（DB 为真相源：pending+in_progress）
+    dao = AgentTaskDAO(db)
+    if dao.count_active(uid, TaskKind.CRAWL) >= MAX_ACTIVE_PER_USER:
         raise CrawlSubmitError(
             409, f"最多同时进行 {MAX_ACTIVE_PER_USER} 个爬取任务，请等前面的完成后再提交"
         )
 
-    # 4) 建任务：状态落 Redis → 入队 → 活跃集合标记
-    task_id = secrets.token_urlsafe(12)
-    state = {
-        "task_id": task_id,
-        "uid": uid,
-        "url": url,
-        "category": category or "general",
-        "max_pages": max_pages,
-        "status": "pending",
-        "done_pages": 0,
-        "failed_pages": 0,
-        "skipped_pages": 0,
-        "current_url": "",
-        "pages": [],
-        "error": "",
-        "heartbeat": time.time(),
-        "created_at": time.time(),
-        "finished_at": 0.0,
-    }
-    pipe = r.pipeline()
-    pipe.set(TASK_KEY.format(task_id=task_id), json.dumps(state, ensure_ascii=False), ex=TASK_TTL_SEC)
-    pipe.rpush(QUEUE_KEY, task_id)
-    pipe.execute()
-    _active_add(r, uid, task_id)
-    logger.info("[kb-crawl] 任务已提交：uid=%s url=%s max_pages=%s", uid, url, max_pages)
-    return task_id
+    # 4) 建任务（kind=crawl，等待 producer 认领）+ 进度态落 Redis（前端面板）
+    task = dao.create(
+        kind=TaskKind.CRAWL,
+        user_id=uid,
+        payload={"url": url, "category": category or "general", "max_pages": max_pages},
+    )
+    try:
+        _save_task(_redis(), {
+            "task_id": task.id,
+            "uid": uid,
+            "url": url,
+            "category": category or "general",
+            "max_pages": max_pages,
+            "status": "pending",
+            "done_pages": 0,
+            "failed_pages": 0,
+            "skipped_pages": 0,
+            "current_url": "",
+            "pages": [],
+            "error": "",
+            "heartbeat": time.time(),
+            "created_at": time.time(),
+            "finished_at": 0.0,
+        })
+    except redis.RedisError as e:
+        # 进度态丢失不影响任务执行（只会少面板展示），记日志继续
+        logger.warning("[kb-crawl] 进度态写入失败（任务照常执行）：%s", e)
+    logger.info(
+        "[kb-crawl] 任务已提交：uid=%s url=%s max_pages=%s task=%s",
+        uid, url, max_pages, task.id,
+    )
+    return task.id
 
 
 def get_crawl_task(uid: int, task_id: str) -> dict | None:
     """读取任务进度；不存在/非本人返回 None（控制器统一 404，隐藏存在性）。
 
     悬挂判定：非终态但 heartbeat 超 10 分钟 → 对外呈现 failed。
+    Redis 不可用时进度态本就不可见，同样按「查不到」降级（不抛 500）。
     """
-    raw = _redis().get(TASK_KEY.format(task_id=task_id))
+    try:
+        raw = _redis().get(TASK_KEY.format(task_id=task_id))
+    except redis.RedisError as e:
+        logger.warning("[kb-crawl] 进度查询降级（Redis 不可用）：%s", e)
+        return None
     if not raw:
         return None
     state = json.loads(raw)
@@ -359,231 +295,64 @@ def get_crawl_task(uid: int, task_id: str) -> dict | None:
 
 
 def get_active_crawl_tasks(uid: int) -> list[dict]:
-    """用户当前全部进行中的爬取任务（进度面板恢复用）；无活跃任务返回空列表。
+    """用户当前全部进行中的爬取任务（进度面板恢复用）。
 
-    内部走 _prune_active：过期/终态成员顺带剪枝；
-    心跳超时的悬挂任务经 get_crawl_task 已置 failed，同样不算活跃。
+    生命周期以 agent_task 表为真相源（pending+in_progress），
+    进度视图取 Redis；排队中（pending）的任务始终算活跃——
+    即使进度态心跳陈旧（如超时回收后续跑前），也不误判失败。
     """
-    return _prune_active(_redis(), uid)
-
-
-# ---------- 后台消费：调度线程 + 线程池并行执行 ----------
-
-_worker_started = False
-_worker_start_lock = threading.Lock()
-_executor: ThreadPoolExecutor | None = None
-# Milvus Lite 对线程级并发写无官方保证，进程级单例客户端加锁串行向量化
-_ingest_lock = threading.Lock()
-
-
-def start_crawl_worker() -> None:
-    """幂等拉起常驻后台消费（main.py create_app 时调用）：
-    一条调度线程 blpop 分发 + CRAWL_WORKERS 条执行线程并行跑任务。
-
-    daemon 线程随后端进程退出；模块级标记保证重复调用只起一套。
-    起线程前先自检：上次停机/崩溃中断的任务自动重新入队续跑。
-    注意：uvicorn --reload 会起多进程，勿在开发模式使用本功能。
-    """
-    global _worker_started, _executor
-    with _worker_start_lock:
-        if _worker_started:
-            return
-        _worker_started = True
-        _recover_interrupted_tasks()
-        _executor = ThreadPoolExecutor(
-            max_workers=CRAWL_WORKERS, thread_name_prefix="kb-crawl-task"
-        )
-        t = threading.Thread(target=_worker_loop, name="kb-crawl-dispatch", daemon=True)
-        t.start()
-        logger.info(
-            "[kb-crawl] 调度线程 + %d 条执行线程已启动（%s）", CRAWL_WORKERS, _WORKER_INSTANCE
-        )
-
-
-def _recover_interrupted_tasks() -> None:
-    """启动自检：把随上一进程死掉的任务（已出队、非终态、心跳超时）重新入队。
-
-    任务被 blpop 出队后就只存在于执行进程里，进程一死就悬空——
-    不恢复的话只能等 10 分钟后被前端看到「心跳丢失」。
-    判死口径与 get_crawl_task 一致（心跳超时）；心跳仍新鲜的任务
-    （可能另一实例正在跑）不动。NX 锁防多进程同时启动重复入队。
-    恢复失败不阻塞 worker 启动。
-    """
-    try:
-        r = _redis()
-        if not r.set(RECOVER_KEY, _WORKER_INSTANCE, nx=True, ex=RECOVER_LOCK_SEC):
-            return
-        for task_id in r.smembers(INFLIGHT_KEY):
-            raw = r.get(TASK_KEY.format(task_id=task_id))
-            if not raw:
-                r.srem(INFLIGHT_KEY, task_id)  # 状态已过期，清残留标记
-                continue
-            state = json.loads(raw)
-            if state["status"] not in ("pending", "running"):
-                r.srem(INFLIGHT_KEY, task_id)  # 上进程已正常收尾，只清了标记
-                continue
-            if not _is_alive(state):
-                r.rpush(QUEUE_KEY, task_id)
-                r.srem(INFLIGHT_KEY, task_id)
-                logger.warning(
-                    "[kb-crawl] 检测到中断任务 %s（心跳超时），已重新入队续跑", task_id
-                )
-            # 心跳仍新鲜：可能另一实例正在执行，不动
-    except Exception:  # noqa: BLE001 —— 恢复失败不影响 worker 启动
-        logger.exception("[kb-crawl] 中断任务恢复失败")
-
-
-def _worker_loop() -> None:
-    """调度循环：blpop 取任务 → 提交线程池并行执行；任何异常都吞掉继续，线程不能死
-
-    任务归属由 blpop 原子性保证（一个任务只会被取走一次），无需全局执行锁。
-    复用同一个带连接池的客户端（redis-py 单条命令级自动重连）。
-    """
-    r = _redis()
-    while True:
-        try:
-            item = r.blpop(QUEUE_KEY, timeout=5)
-            if not item:
-                continue
-            _, task_id = item
-            # 出队即标记执行中：此刻任务已不在队列，进程死掉就靠它启动时恢复
-            r.sadd(INFLIGHT_KEY, task_id)
-            _executor.submit(_run_task_guarded, task_id)
-        except Exception:  # noqa: BLE001 —— 循环本体绝不上抛
-            logger.exception("[kb-crawl] 消费调度异常")
-            time.sleep(2)
-
-
-def _run_task_guarded(task_id: str) -> None:
-    """线程池执行包装：兜住一切意外异常，防止静默丢任务"""
-    try:
-        _run_task(task_id)
-    except Exception:  # noqa: BLE001
-        logger.exception("[kb-crawl] 任务 %s 意外异常", task_id)
-
-
-def _run_task(task_id: str) -> None:
-    """执行单个爬取任务：逐页 抓取→校验→AI清洗→upsert→即时向量化。
-
-    独立 SessionLocal（线程池里每个任务一个，天然隔离）；
-    无论成败，finally 里必写终态、移出活跃集合与执行集合。
-    """
-    r = _redis()
-    task_key = TASK_KEY.format(task_id=task_id)
-
-    raw = r.get(task_key)
-    if not raw:
-        r.srem(INFLIGHT_KEY, task_id)  # 任务已过期，清掉出队标记
-        return
-    state = json.loads(raw)
-    uid = state["uid"]
-
     db = SessionLocal()
     try:
-        # 双保险：提交时查过一次，执行前再查（用户可能中途清空配置）
-        llm = build_llm_for_user(db, uid)
-        if llm is None:
-            state["status"] = "failed"
-            state["error"] = "未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型后再爬取"
-            return
-
-        state["status"] = "running"
-        state["heartbeat"] = time.time()
-        _save_task(r, state)
-        # 排队期间可能已被剪枝（心跳超时判死），重新挂回活跃集合
-        _active_add(r, uid, task_id)
-
-        crawler = ShallowCrawler(max_pages=state["max_pages"])
-        for page in crawler.iter_pages(state["url"]):
-            state["current_url"] = page["url"]
-            _heartbeat(r, state)
-
-            if not page["ok"]:
-                # 抓取失败：记入失败页，逐页降级继续
-                state["failed_pages"] += 1
-                state["pages"].append(
-                    {
-                        "url": page["url"],
-                        "ok": False,
-                        "cleaned": False,
-                        "knowledge_id": None,
-                        "error": page.get("error", "抓取失败"),
-                    }
-                )
-                _save_task(r, state)
-                continue
-
-            if not TechSpider.is_valid_article(page):
-                # 正文太短（导航页/空页）：无知识价值，跳过不入库
-                state["skipped_pages"] += 1
-                _save_task(r, state)
-                continue
-
-            # AI 清洗（失败自动回退原文）→ upsert → 即时向量化
-            title = page.get("title") or page["url"]
-            # 阻塞步骤前后刷新心跳：清洗走用户模型（≤120s/次）、向量化走 Milvus，
-            # 慢调用不该被算进「心跳静止」窗口
-            _heartbeat(r, state)
-            cleaned_text, cleaned = clean_page_content(llm, title, page["content"])
-            _heartbeat(r, state)
-            row = KnowledgeDAO(db).upsert(
-                title=title,
-                content=cleaned_text,
-                source_url=page["url"],
-                category=state["category"],
-                source_type="personal",
-                user_id=uid,
-            )
-            knowledge_id = row.id if row else None
-            if row is not None and row.status == KnowledgeModel.STATUS_PENDING:
-                _heartbeat(r, state)
-                try:
-                    # 进程级锁：Milvus Lite 单文件单例，并行任务的向量化串行写
-                    with _ingest_lock:
-                        IngestionPipeline(db).ingest_row(row)
-                except Exception:  # noqa: BLE001 —— 单页向量化失败不中断任务
-                    logger.exception("[kb-crawl] 页面 %s 向量化失败", page["url"])
-
-            state["done_pages"] += 1
-            state["pages"].append(
-                {
-                    "url": page["url"],
-                    "ok": True,
-                    "cleaned": cleaned,
-                    "knowledge_id": knowledge_id,
-                    "error": "",
-                }
-            )
-            _save_task(r, state)
-
-        # 终态判定：全部成功=done；有失败但有成功=partial；颗粒无收=failed
-        if state["done_pages"] > 0 and state["failed_pages"] == 0:
-            state["status"] = "done"
-        elif state["done_pages"] > 0:
-            state["status"] = "partial"
-        else:
-            state["status"] = "failed"
-            first_err = next((p["error"] for p in state["pages"] if p.get("error")), "")
-            state["error"] = first_err or "未能爬到任何有效页面"
-    except Exception as e:  # noqa: BLE001 —— 总兜底：任务置 failed
-        logger.exception("[kb-crawl] 任务 %s 异常", task_id)
-        state["status"] = "failed"
-        state["error"] = f"任务执行异常：{e}"
-    finally:
-        # 必达：写终态 + 移出活跃集合 + 移出执行集合
-        state["finished_at"] = time.time()
-        try:
-            _save_task(r, state)
-            _active_remove(r, uid, task_id)
-            r.srem(INFLIGHT_KEY, task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("[kb-crawl] 任务 %s 收尾失败", task_id)
-        db.close()
-        logger.info(
-            "[kb-crawl] 任务 %s 结束：%s（成功 %s / 失败 %s / 跳过 %s）",
-            task_id, state["status"],
-            state["done_pages"], state["failed_pages"], state["skipped_pages"],
+        rows = AgentTaskDAO(db).list_by_user(
+            uid,
+            kind=TaskKind.CRAWL,
+            statuses=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
         )
+    finally:
+        db.close()
+
+    try:
+        r = _redis()
+    except Exception:  # noqa: BLE001 —— Redis 配置异常也不影响列表语义
+        r = None
+
+    out = []
+    for row in rows:
+        state = None
+        if r is not None:
+            try:
+                raw = r.get(TASK_KEY.format(task_id=row.id))
+                if raw:
+                    state = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                state = None
+        if state is None:
+            # 进度态缺失（Redis 重启等）：按 payload 拼 pending 视图，不丢任务
+            p = row.payload or {}
+            state = {
+                "task_id": row.id,
+                "uid": uid,
+                "url": p.get("url", ""),
+                "category": p.get("category", "general"),
+                "max_pages": p.get("max_pages", 10),
+                "status": "pending",
+                "done_pages": 0,
+                "failed_pages": 0,
+                "skipped_pages": 0,
+                "current_url": "",
+                "pages": [],
+                "error": "",
+                "heartbeat": time.time(),
+                "created_at": time.time(),
+                "finished_at": 0.0,
+            }
+        if row.status == TaskStatus.PENDING:
+            state["status"] = "pending"  # 排队（含回收待重跑）以 DB 为准
+        elif state["status"] == "running" and not _is_alive(state):
+            state["status"] = "failed"
+            state["error"] = state.get("error") or "任务超时（心跳丢失），已标记失败"
+        out.append(state)
+    return out
 
 
 # ---------- AI 添加（对话式定题 → 自动爬取） ----------
