@@ -1,9 +1,11 @@
-"""引擎装配：幂等拉起 Producer Agent 池 + 超时回收器（main.py create_app 调用）。
+"""引擎装配：幂等拉起全部 Agent + 超时回收器（main.py create_app 调用）。
 
-启动顺序（对齐设计文档阶段 0）：
+启动顺序：
 1. 启动自检：上次停机/崩溃遗留的执行中任务立即回收（不等 5 分钟心跳超时）
-2. Producer Agent × PRODUCER_INSTANCES（IO 等待型角色，实例换吞吐）
-3. TimeoutReaper（心跳超时回收 + 重试上限，唯一集中式兜底）
+2. Producer × PRODUCER_INSTANCES（IO 等待型，实例换吞吐）
+3. Reviewer × 1（质检，审核与生产分离）
+4. Curator × 1（术语整理，接力懒消费）
+5. TimeoutReaper（心跳超时回收 + 重试上限，唯一集中式兜底）
 
 注意：uvicorn --reload 会起多进程，勿在开发模式使用（重复消费）。
 """
@@ -12,7 +14,9 @@ import threading
 
 from agent_engine.base_agent import BaseAgent
 from agent_engine.reaper import TimeoutReaper
+from agents.curator import CuratorAgent
 from agents.producer import ProducerAgent
+from agents.reviewer import ReviewerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +44,14 @@ def start_agent_engine() -> None:
             agent = ProducerAgent(f"producer-{i}")
             agent.start()
             _agents.append(agent)
+        for agent in (ReviewerAgent("reviewer-01"), CuratorAgent("curator-01")):
+            agent.start()
+            _agents.append(agent)
 
         _reaper = TimeoutReaper()
         _reaper.start()
 
         logger.info(
-            "[agent-engine] 已启动：producer×%s + reaper", PRODUCER_INSTANCES
+            "[agent-engine] 已启动：producer×%s + reviewer + curator + reaper",
+            PRODUCER_INSTANCES,
         )

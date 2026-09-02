@@ -1,10 +1,11 @@
 """每日学习卡片接口：GET /api/card/today（阶段 7.5）
 
 流程（对应 CLAUDE.md §7.5）：
-    Redis key daily:card:YYYY-MM-DD
+    Redis key daily:card:v3:{user_id}:YYYY-MM-DD
       命中 → 直接返回
-      未命中 → 用日期做随机种子从 tech_term 抽一条（同一天结果稳定）
+      未命中 → 用日期做随机种子从「全局+本人」术语抽一条（同一天结果稳定）
              → 写回 Redis，过期时间设到当天 24:00
+    术语用户化后缓存键带 user_id：个人术语只进本人卡片。
 """
 import json
 import random
@@ -88,21 +89,27 @@ def overview(db: Session = Depends(get_db), user=Depends(get_current_user)):
         or 0
     )
     eval_stats = EvaluateDAO(db).stats(user.id)
+    term_dao = TechTermDAO(db)
     return {
         "knowledge": knowledge,
         "my_knowledge": my_knowledge,
-        "terms": TechTermDAO(db).count(),
+        "terms": term_dao.count(user_id=0),
+        "my_terms": term_dao.count(user_id=user.id),
         "evals": eval_stats["total"],
         "eval_avg_score": eval_stats["avg_score"],
     }
 
 
 @router.get("/today")
-def today_card(db: Session = Depends(get_db)):
-    """今日学习卡片：同一天多次刷新内容不变，换天自动换新"""
+def today_card(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """今日学习卡片：同一天多次刷新内容不变，换天自动换新。
+
+    抽取范围 = 全局术语 + 本人个人术语（个人术语由知识爬取的
+    curator Agent 提炼，仅本人可见）。
+    """
     today = date.today().isoformat()
-    # v2：卡片新增详细讲解/示例字段后升版，避免命中旧结构缓存
-    key = f"daily:card:v2:{today}"
+    # v3：缓存键加用户维度（个人术语只进本人卡片）
+    key = f"daily:card:v3:{user.id}:{today}"
     r = _redis()
 
     # 1) 缓存命中直接返回
@@ -110,16 +117,17 @@ def today_card(db: Session = Depends(get_db)):
     if cached:
         return json.loads(cached)
 
-    # 2) 未命中：日期种子抽卡
+    # 2) 未命中：日期种子抽卡（同一天同一用户结果稳定）
     dao = TechTermDAO(db)
-    terms = dao.list_all()
+    terms = dao.list_visible(user.id)
     if not terms:
         raise HTTPException(
             status_code=404,
             detail="还没有术语数据，请先运行 scripts/seed_terms.py 灌种子",
         )
 
-    card = _to_card(pick_card(terms, today), today)
+    seed = f"{user.id}:{today}"  # 用户+日期共同作种子，各人卡片可不同
+    card = _to_card(pick_card(terms, seed), today)
 
     # 3) 写回 Redis，过期时间到当天 24:00
     r.set(key, json.dumps(card, ensure_ascii=False), ex=_seconds_until_midnight())

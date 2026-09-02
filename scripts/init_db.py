@@ -92,6 +92,39 @@ def ensure_knowledge_unique(conn) -> None:
     print("OK: SHOW INDEX 复核通过（uq_knowledge_user_url 已就位）")
 
 
+def ensure_term_user_unique(conn) -> None:
+    """tech_term 唯一约束迁移：单列 term → 复合 (user_id, term)。
+
+    术语加了用户归属（个人知识提炼的个人术语），全局/个人可同名共存。
+    按存在性裁剪子句，单条 ALTER 完成，幂等可重跑。
+    """
+    rows = conn.execute(
+        text(
+            "SELECT INDEX_NAME, NON_UNIQUE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols "
+            "FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tech_term' "
+            "GROUP BY INDEX_NAME, NON_UNIQUE"
+        )
+    ).fetchall()
+    # {索引名: (是否非唯一, 列组合)}
+    indexes = {r[0]: (r[1], r[2]) for r in rows}
+
+    clauses = []
+    # 找出「只含 term 列的唯一索引」（建表时 unique=True 生成，名字不定）
+    for name, (non_unique, cols) in indexes.items():
+        if non_unique == 0 and cols == "term":
+            clauses.append(f"DROP INDEX `{name}`")
+    if "uq_term_user_term" not in indexes:
+        clauses.append("ADD UNIQUE KEY `uq_term_user_term` (`user_id`, `term`)")
+    if not clauses:
+        print("OK: tech_term 已是复合唯一索引 (user_id, term)，跳过")
+        return
+
+    conn.execute(text(f"ALTER TABLE `tech_term` {', '.join(clauses)}"))
+    conn.commit()
+    print(f"OK: tech_term 唯一索引已迁移：{', '.join(clauses)}")
+
+
 def main() -> None:
     print("正在连接数据库并建表...")
     init_db()
@@ -126,6 +159,16 @@ def main() -> None:
             conn.commit()
             print("OK: knowledge.status 已全量重置为 0（待向量化），"
                   "启动后端后请重跑 /api/embedding/run 回灌向量库")
+
+    # 术语表用户化迁移（幂等）：补 user_id（0=全局，存量不动）+ 复合唯一
+    with engine.connect() as conn:
+        ensure_column(
+            conn,
+            "tech_term",
+            "user_id",
+            "user_id INT NOT NULL DEFAULT 0 COMMENT '归属；0=全局，>0=个人'",
+        )
+        ensure_term_user_unique(conn)
 
     # 抽查：表是否都存在
     with engine.connect() as conn:

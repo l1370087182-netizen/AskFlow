@@ -161,6 +161,20 @@ class ProducerAgent(BaseAgent):
                 output=output,
                 log_action="complete", log_desc=summary,
             )
+            # 接力：有入库条目 → 发质检子任务（审核与生产分离）
+            knowledge_ids = [
+                p["knowledge_id"] for p in state["pages"]
+                if p.get("ok") and p.get("knowledge_id")
+            ]
+            if knowledge_ids:
+                dao.create(
+                    kind=TaskKind.QUALITY_REVIEW,
+                    user_id=task.user_id,
+                    payload={"knowledge_ids": knowledge_ids, "crawl_task_id": task.id},
+                    parent_id=task.id,
+                    trace_id=task.trace_id,
+                    agent=self.agent_id,
+                )
         logger.info("[producer:%s] 任务 %s 结束：%s（%s）",
                     self.agent_id, task.id, state["status"], summary)
 
