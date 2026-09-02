@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 MAX_ITEMS = 6          # 目标拆解/计划条目上限
 REFS_PER_TOPIC = 2     # 每个主题附带的知识库引用数
 REF_CONTEXT_CHARS = 1500  # 编材料时每个引用带入的正文长度
+# rerank 相关度阈值：混合检索永远返回 top-k（哪怕全不相关，也会返回
+# 「最不相关里最靠前」的块），不看分数会把无关块误判成「知识库有资料」，
+# 堵死缺资料自动爬取的触发条件——低于阈值一律视为未命中。
+# rerank 不可用时的降级分（rrf，量纲 0~0.03）不做阈值，避免降级期误杀。
+REF_MIN_SCORE = 0.3
+
+
+def _relevant_hits(hits: list[dict], min_score: float = REF_MIN_SCORE) -> list[dict]:
+    """过滤 rerank 相关度过低的命中（无 knowledge_id 的也一并剔除）"""
+    out = []
+    for h in hits:
+        if not h.get("knowledge_id"):
+            continue
+        if h.get("rerank_score") is not None and (h.get("score") or 0) < min_score:
+            continue
+        out.append(h)
+    return out
 
 # 任务板：目标拆解
 GOAL_DECOMPOSE_PROMPT = """你是技术学习规划助手。用户发布了一个学习目标，请拆解成 3-6 个循序渐进的学习子题：
@@ -335,10 +352,16 @@ class PlannerAgent(BaseAgent):
 
     @staticmethod
     def _search_refs(db, uid: int, topic: str) -> list[dict]:
-        """按主题现检索知识库引用（自动爬取完成后的新资料由此进入材料）"""
+        """按主题现检索知识库引用（自动爬取完成后的新资料由此进入材料）。
+
+        带相关度阈值过滤——避免把无关块当资料塞给模型。
+        """
         try:
             hits = HybridRetriever(db).search(topic, top_k=REFS_PER_TOPIC, uid=uid)
-            return [{"knowledge_id": h.get("knowledge_id")} for h in hits if h.get("knowledge_id")]
+            return [
+                {"knowledge_id": h.get("knowledge_id")}
+                for h in _relevant_hits(hits)
+            ]
         except Exception as e:  # noqa: BLE001 —— 检索失败则材料不带引用
             logger.warning("[planner] 主题「%s」检索失败（材料不带引用）：%s", topic, e)
             return []
@@ -362,9 +385,12 @@ class PlannerAgent(BaseAgent):
             except Exception as e:  # noqa: BLE001 —— 单主题失败跳过
                 logger.warning("[planner] 主题「%s」检索失败：%s", topic, e)
                 continue
+            hits = _relevant_hits(hits)
+            if not hits:
+                continue  # 无相关命中：不给引用（触发上游自动补爬）
             refs[topic] = [
                 {"knowledge_id": h.get("knowledge_id"), "title": (h.get("content") or "")[:40]}
-                for h in hits if h.get("knowledge_id")
+                for h in hits
             ]
         return refs
 
