@@ -97,6 +97,25 @@ class CrawlTaskOut(BaseModel):
     finished_at: float = 0.0
 
 
+class CrawlActiveOut(BaseModel):
+    """当前全部活跃爬取任务（并行化后单用户可多个）"""
+
+    tasks: list[CrawlTaskOut] = []
+
+
+# ---------- 知识翻译（Edge 免密钥接口，按需翻译不改库存） ----------
+
+class KnowledgeTranslateOut(BaseModel):
+    """知识翻译结果：详情弹窗按需展示，不写回知识库"""
+
+    id: int
+    detected: str | None = Field(default=None, description="自动检测的源语言")
+    same_language: bool = Field(default=False, description="原文已是中文，原样返回")
+    title: str
+    content: str
+    cached: bool = Field(default=False, description="是否命中翻译缓存")
+
+
 # ---------- AI 添加（对话式定题 → 自动爬取） ----------
 
 class AIAddMessage(BaseModel):

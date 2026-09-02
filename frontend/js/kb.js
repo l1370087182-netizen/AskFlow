@@ -12,6 +12,11 @@ let editingId = null;
 // 分页：每页 10 条；「我的知识」记住当前页，增删改后停在原页刷新
 const PAGE_SIZE = 10;
 let myPage = 1;
+// 详情弹窗按需翻译：原文/译文与当前视图状态（弹窗关闭即失效）
+let detailId = null;
+let detailOriginal = null;    // {title, content}
+let detailTranslated = null;  // {title, content}
+let detailShowingTrans = false;
 
 // ---------- tab 切换 ----------
 
@@ -133,14 +138,63 @@ async function openDetail(id) {
     (d.created_at ? d.created_at.slice(0, 10) : '') + '</span>' + link;
   document.getElementById('modal-body').innerHTML = renderKnowledge(d.content);
   document.getElementById('kb-modal').style.display = '';
+
+  // 按需翻译：记住原文，翻译按钮复位
+  detailId = d.id;
+  detailOriginal = { title: d.title, content: d.content };
+  detailTranslated = null;
+  detailShowingTrans = false;
+  const btn = document.getElementById('btn-translate');
+  btn.style.display = '';
+  btn.disabled = false;
+  btn.textContent = '🌐 翻译';
 }
 
+// 详情弹窗：整篇翻译（代码块保留），可切回原文
+async function toggleTranslate() {
+  const btn = document.getElementById('btn-translate');
+  if (detailShowingTrans) {
+    document.getElementById('modal-title').textContent = detailOriginal.title;
+    document.getElementById('modal-body').innerHTML = renderKnowledge(detailOriginal.content);
+    detailShowingTrans = false;
+    btn.textContent = '🌐 翻译';
+    return;
+  }
+  if (!detailTranslated) {
+    btn.disabled = true;
+    btn.textContent = '翻译中…';
+    try {
+      const r = await apiPostJson(`/api/translate/knowledge/${detailId}`, {});
+      if (r.same_language) {
+        btn.disabled = false;
+        btn.textContent = '🌐 翻译';
+        alert('内容已经是中文，无需翻译');
+        return;
+      }
+      detailTranslated = { title: r.title, content: r.content };
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = '🌐 翻译';
+      alert('翻译失败：' + e.message);
+      return;
+    }
+  }
+  document.getElementById('modal-title').textContent =
+    detailTranslated.title || detailOriginal.title;
+  document.getElementById('modal-body').innerHTML = renderKnowledge(detailTranslated.content);
+  detailShowingTrans = true;
+  btn.disabled = false;
+  btn.textContent = '原文';
+}
+
+document.getElementById('btn-translate').addEventListener('click', toggleTranslate);
 document.getElementById('modal-close').addEventListener('click', closeModal);
 document.getElementById('kb-modal').addEventListener('click', (e) => {
   if (e.target.id === 'kb-modal') closeModal();
 });
 function closeModal() {
   document.getElementById('kb-modal').style.display = 'none';
+  document.getElementById('btn-translate').style.display = 'none';
 }
 
 // ---------- 我的知识：列表 ----------
@@ -329,22 +383,81 @@ async function submitCrawl() {
   try {
     const r = await apiPostJson('/api/knowledge/my/crawl', { url, category, max_pages: maxPages });
     closeCrawlModal();
-    startCrawlPolling(r.task_id);
+    trackCrawlTask(r.task_id);
   } catch (e) {
-    if (e.status === 409 && e.detail && e.detail.task_id) {
-      // 已有活跃任务：直接用返回的 task_id 续看进度
-      closeCrawlModal();
-      startCrawlPolling(e.detail.task_id);
-      return;
-    }
     if (e.status === 400) {
       setCrawlMsg(e.message + '（到对话学习页 ⚙️ 配置模型：chat.html）', true);
     } else {
+      // 409 = 活跃任务达上限，其余错误原样提示
       setCrawlMsg(e.message, true);
     }
   } finally {
     btn.disabled = false;
   }
+}
+
+// ---------- 爬取面板：多任务并行跟踪 ----------
+
+// task_id -> {el, done}；单个定时器（顶部 crawlTimer）轮询全部跟踪中的任务
+const crawlTasks = new Map();
+
+const CRAWL_STATUS_LABEL = {
+  pending: '排队中',
+  running: '爬取中',
+  done: '已完成',
+  partial: '部分完成',
+  failed: '失败',
+};
+const CRAWL_BADGE_CLASS = {
+  pending: 'badge-pending', running: 'badge-running',
+  done: 'badge-done', partial: 'badge-partial', failed: 'badge-failed',
+};
+
+function trackCrawlTask(taskId, initialState) {
+  if (crawlTasks.has(taskId)) return;
+  const el = document.createElement('div');
+  el.className = 'crawl-task';
+  el.innerHTML = `
+    <div class="crawl-task-head">
+      <span class="ct-badge badge">等待中</span>
+      <span class="ct-url row-meta"></span>
+    </div>
+    <div class="progress"><div class="ct-bar progress-bar" style="width:0%"></div></div>
+    <div class="ct-current row-meta"></div>
+    <div class="ct-pages crawl-pages"></div>
+    <div class="ct-summary crawl-summary"></div>`;
+  document.getElementById('crawl-tasks').appendChild(el);
+  crawlTasks.set(taskId, { el, done: false });
+  document.getElementById('crawl-panel').style.display = '';
+  renderCrawlTask(taskId, initialState ||
+    { status: 'pending', max_pages: 0, pages: [], current_url: '', url: '' });
+  updateCrawlCount();
+  ensureCrawlTimer();
+}
+
+function removeCrawlTask(taskId) {
+  const rec = crawlTasks.get(taskId);
+  if (!rec) return;
+  rec.el.remove();
+  crawlTasks.delete(taskId);
+  updateCrawlCount();
+  if (!crawlTasks.size) {
+    stopCrawlPolling();
+    document.getElementById('crawl-panel').style.display = 'none';
+  }
+}
+
+function updateCrawlCount() {
+  let running = 0;
+  for (const rec of crawlTasks.values()) if (!rec.done) running++;
+  document.getElementById('crawl-count').textContent =
+    crawlTasks.size ? `${running} 进行中 / 共 ${crawlTasks.size} 个` : '';
+}
+
+function ensureCrawlTimer() {
+  if (crawlTimer) return;
+  crawlTimer = setInterval(pollCrawlTasks, 2000);
+  pollCrawlTasks();
 }
 
 function stopCrawlPolling() {
@@ -354,70 +467,48 @@ function stopCrawlPolling() {
   }
 }
 
-function startCrawlPolling(taskId) {
-  stopCrawlPolling();
-  document.getElementById('crawl-panel').style.display = '';
-  renderCrawlPanel({ status: 'pending', max_pages: 0, pages: [], current_url: '' });
-  const tick = async () => {
+async function pollCrawlTasks() {
+  for (const [taskId, rec] of [...crawlTasks]) {
+    if (rec.done) continue;
     let task;
     try {
       task = await apiGet(`/api/knowledge/my/crawl/${taskId}`);
     } catch (e) {
-      // 404（过期/不存在）等：停止轮询并提示
-      stopCrawlPolling();
-      document.getElementById('crawl-summary').textContent = '进度查询失败：' + e.message;
-      return;
+      // 404（过期/不存在）等：移除任务块
+      removeCrawlTask(taskId);
+      continue;
     }
-    renderCrawlPanel(task);
+    renderCrawlTask(taskId, task);
     if (['done', 'partial', 'failed'].includes(task.status)) {
-      stopCrawlPolling();
+      rec.done = true;
       // 新入库条目排在最前，回第 1 页刷新
       loadMyList(1);
+      updateCrawlCount();
     }
-  };
-  tick();
-  crawlTimer = setInterval(tick, 2000);
-}
-
-// 进入「我的知识」时恢复进行中的爬取任务（刷新页面后面板不丢）
-async function resumeActiveCrawl() {
-  let task;
-  try {
-    task = await apiGet('/api/knowledge/my/crawl/active');
-  } catch (e) {
-    return; // 404 = 无进行中任务，静默
-  }
-  if (['pending', 'running'].includes(task.status)) {
-    startCrawlPolling(task.task_id);
   }
 }
 
-const CRAWL_STATUS_LABEL = {
-  pending: '排队中',
-  running: '爬取中',
-  done: '已完成',
-  partial: '部分完成',
-  failed: '失败',
-};
+function renderCrawlTask(taskId, task) {
+  const rec = crawlTasks.get(taskId);
+  if (!rec) return;
+  const el = rec.el;
 
-function renderCrawlPanel(task) {
-  const badge = document.getElementById('crawl-badge');
+  const badge = el.querySelector('.ct-badge');
   badge.textContent = CRAWL_STATUS_LABEL[task.status] || task.status;
-  badge.className = 'badge ' + ({
-    pending: 'badge-pending', running: 'badge-running',
-    done: 'badge-done', partial: 'badge-partial', failed: 'badge-failed',
-  }[task.status] || '');
+  badge.className = 'ct-badge badge ' + (CRAWL_BADGE_CLASS[task.status] || '');
+
+  if (task.url) el.querySelector('.ct-url').textContent = task.url;
 
   const finished = (task.done_pages || 0) + (task.failed_pages || 0) + (task.skipped_pages || 0);
   const pct = task.max_pages ? Math.min(100, Math.round(finished / task.max_pages * 100)) : 0;
-  document.getElementById('crawl-bar').style.width = pct + '%';
+  el.querySelector('.ct-bar').style.width = pct + '%';
 
-  document.getElementById('crawl-current').textContent =
+  el.querySelector('.ct-current').textContent =
     task.status === 'running' && task.current_url
       ? '正在处理：' + task.current_url
       : '';
 
-  const pagesBox = document.getElementById('crawl-pages');
+  const pagesBox = el.querySelector('.ct-pages');
   pagesBox.innerHTML = '';
   for (const p of task.pages || []) {
     const line = document.createElement('div');
@@ -433,7 +524,7 @@ function renderCrawlPanel(task) {
     pagesBox.appendChild(line);
   }
 
-  const summary = document.getElementById('crawl-summary');
+  const summary = el.querySelector('.ct-summary');
   if (['done', 'partial', 'failed'].includes(task.status)) {
     let text = `结果：成功 ${task.done_pages} · 失败 ${task.failed_pages} · 跳过 ${task.skipped_pages}`;
     if (task.error) text += ' · ' + task.error;
@@ -441,6 +532,30 @@ function renderCrawlPanel(task) {
   } else {
     summary.textContent = '';
   }
+}
+
+// 进入「我的知识」时恢复进行中的爬取任务（刷新页面后面板不丢）
+async function resumeActiveCrawl() {
+  let data;
+  try {
+    data = await apiGet('/api/knowledge/my/crawl/active');
+  } catch (e) {
+    return; // 出错静默，不影响列表浏览
+  }
+  const live = new Set(
+    (data.tasks || [])
+      .filter((t) => ['pending', 'running'].includes(t.status))
+      .map((t) => t.task_id)
+  );
+  // 面板上残留但已不活跃（完成/过期）的任务块：移除
+  for (const taskId of [...crawlTasks.keys()]) {
+    if (!live.has(taskId)) removeCrawlTask(taskId);
+  }
+  for (const t of data.tasks || []) {
+    if (live.has(t.task_id)) trackCrawlTask(t.task_id, t);
+  }
+  // 切 tab 时停掉的轮询，若还有未完成任务则恢复
+  if ([...crawlTasks.values()].some((r) => !r.done)) ensureCrawlTimer();
 }
 
 document.getElementById('btn-crawl').addEventListener('click', openCrawlModal);
@@ -451,6 +566,10 @@ document.getElementById('crawl-modal').addEventListener('click', (e) => {
 });
 document.getElementById('crawl-panel-close').addEventListener('click', () => {
   stopCrawlPolling();
+  // 清空任务块；仍在进行的任务下次进入「我的知识」会自动恢复
+  crawlTasks.clear();
+  document.getElementById('crawl-tasks').innerHTML = '';
+  document.getElementById('crawl-count').textContent = '';
   document.getElementById('crawl-panel').style.display = 'none';
 });
 
@@ -503,10 +622,10 @@ async function sendAiAdd() {
     aiHistory.push({ role: 'assistant', content: r.message });
     appendAiMsg('assistant', r.message);
     setAiTip('');
-    // action=crawl（已提交任务）或 ask 但带回活跃任务（409）→ 直接跳进度面板
+    // action=crawl（已提交任务）→ 直接挂上进度面板
     if (r.task_id) {
       closeAiModal();
-      startCrawlPolling(r.task_id);
+      trackCrawlTask(r.task_id);
     }
   } catch (e) {
     setAiTip(e.message, true);

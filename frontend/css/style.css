@@ -487,13 +487,23 @@ a { color: var(--brand); text-decoration: none; }
 .kb-pager:empty { margin-top: 0; }
 .kb-pager button[disabled] { opacity: .45; cursor: not-allowed; }
 
-/* 爬取进度面板（置顶展示，间距留给下方工具栏） */
+/* 爬取进度面板（置顶展示，间距留给下方工具栏；支持多任务并行） */
 .crawl-panel {
   background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
   padding: 16px 18px; margin: 0 0 18px; font-size: 13px;
 }
-.crawl-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.crawl-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .crawl-head .modal-close { margin-left: auto; }
+.crawl-task { padding: 12px 0 4px; border-top: 1px dashed var(--line); }
+.crawl-task:first-child { border-top: none; padding-top: 6px; }
+.crawl-task-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.crawl-task-head .ct-url {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.crawl-task .progress { margin-bottom: 6px; }
+
+/* 弹窗头部右侧按钮组（详情弹窗：翻译 + 关闭） */
+.modal-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .progress {
   height: 8px; background: var(--bg); border-radius: 999px; overflow: hidden;
 }

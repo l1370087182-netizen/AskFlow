@@ -19,6 +19,7 @@ def create_app():
     from controller.interview_controller import router as interview_router
     from controller.auth_controller import router as auth_router
     from controller.user_controller import router as user_router
+    from controller.translate_controller import router as translate_router
 
     app = FastAPI(title="智能问答系统（学习版）")
 
@@ -49,6 +50,7 @@ def create_app():
         evaluate_router,
         interview_router,
         user_router,
+        translate_router,
     ):
         app.include_router(r, dependencies=_auth)
 

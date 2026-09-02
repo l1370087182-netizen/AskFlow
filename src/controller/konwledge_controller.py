@@ -31,6 +31,7 @@ from schema.knowledge import (
     KnowledgeMyUpdateRequest,
     KnowledgeCrawlRequest,
     CrawlTaskOut,
+    CrawlActiveOut,
     AIAddRequest,
     AIAddResponse,
 )
@@ -129,10 +130,10 @@ def my_crawl_submit(
     db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """提交整站浅爬任务（后台线程消费，202 + task_id，进度另查）。
+    """提交整站浅爬任务（后台线程池并行消费，202 + task_id，进度另查）。
 
     400：未配置个人模型（提示去 ⚙️）/ URL 非法 / SSRF 拦截
-    409：已有活跃任务，detail 带回 task_id 供前端直接续看进度
+    409：活跃任务达上限（detail.message 提示，等待前面的任务完成）
     """
     try:
         task_id = kb_service.submit_crawl(
@@ -150,19 +151,17 @@ def my_crawl_submit(
     return {"task_id": task_id, "status": "pending"}
 
 
-@router.get("/my/crawl/active", response_model=CrawlTaskOut)
+@router.get("/my/crawl/active", response_model=CrawlActiveOut)
 def my_crawl_active(
     user: UserModel = Depends(get_current_user),
 ):
-    """当前进行中的爬取任务（前端进入「我的知识」时恢复进度面板）。
+    """当前全部进行中的爬取任务（前端进入「我的知识」时恢复进度面板）。
 
     务必声明在 /my/crawl/{task_id} 之前，否则 "active" 被当成 task_id。
-    无活跃任务（含悬挂超时/已终态）统一 404。
+    并行化后单用户可多个任务；无活跃任务（含悬挂超时/已终态）返回空列表。
     """
-    state = kb_service.get_active_crawl_task(user.id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="当前没有进行中的爬取任务")
-    return CrawlTaskOut(**state)
+    states = kb_service.get_active_crawl_tasks(user.id)
+    return CrawlActiveOut(tasks=[CrawlTaskOut(**s) for s in states])
 
 
 @router.get("/my/crawl/{task_id}", response_model=CrawlTaskOut)
