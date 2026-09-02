@@ -17,7 +17,7 @@ from agent_engine.base_agent import BaseAgent, TaskPermanentError
 from generation.llm import build_llm_for_user
 from interview.prompts import PLANNER_PROMPT
 from milvus.retrieval.hybird import HybridRetriever
-from model.AgentTaskModel import TaskKind
+from model.AgentTaskModel import AgentTaskModel, TaskKind, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,15 @@ class PlannerAgent(BaseAgent):
         # 逐题检索知识库引用，随子任务携带
         refs = self._collect_refs(db, task.user_id, [i["topic"] for i in items], [])
 
+        # 缺资料主题自动补爬（设计文档 §2B-3：先查知识库，命中用库内；缺失发
+        # 爬取子任务入本人个人知识库，爬完再编材料——「知识资产越用越厚」）
+        crawl_ids: dict[str, str] = {}
+        for it in items:
+            if not refs.get(it["topic"]):
+                cid = self._auto_crawl_topic(db, task.user_id, it["topic"])
+                if cid:
+                    crawl_ids[it["topic"]] = cid
+
         # 创建子任务（parent 显式挂边），目标任务随即完成
         # order 记录取拆解顺序（先基础后进阶）——任务 id 是随机 hex，顺序不能靠 id
         out_items = []
@@ -181,6 +190,7 @@ class PlannerAgent(BaseAgent):
                     "goal": goal_text,
                     "order": i,
                     "refs": refs.get(it["topic"], []),
+                    "crawl_task_id": crawl_ids.get(it["topic"], ""),
                 },
                 parent_id=task.id,
                 trace_id=task.trace_id,
@@ -188,11 +198,14 @@ class PlannerAgent(BaseAgent):
             )
             out_items.append({**it, "task_id": child.id})
 
+        log_desc = f"目标已拆解为 {len(out_items)} 个学习子题"
+        if crawl_ids:
+            log_desc += f"，{len(crawl_ids)} 个子题缺资料已自动提交爬取"
         dao.write_back(
             task.id, self.agent_id, task.version,
             output={"goal": goal_text, "items": out_items},
             log_action="complete",
-            log_desc=f"目标已拆解为 {len(out_items)} 个学习子题",
+            log_desc=log_desc,
         )
         logger.info(
             "[planner:%s] 目标 %s 已拆解：%s 个子题", self.agent_id, task.id, len(out_items)
@@ -209,10 +222,16 @@ class PlannerAgent(BaseAgent):
         if llm is None:
             raise TaskPermanentError("未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型")
 
+        # 引用资料：拆解时带上的优先；为空时现检索一次（自动爬取刚完成
+        # 的新资料此刻才检索得到——命中即带着编材料）
+        refs = list(p.get("refs") or [])
+        if not refs:
+            refs = self._search_refs(db, task.user_id, topic)
+
         # 引用资料拉正文（全局或本人条目，他人个人块引用不到——检索时就过滤过）
         kb_dao = KnowledgeDAO(db)
         context_parts = []
-        for ref in (p.get("refs") or [])[:3]:
+        for ref in refs[:3]:
             row = kb_dao.get_by_db(ref.get("knowledge_id"))
             if row is None or row.user_id not in (0, task.user_id):
                 continue
@@ -233,6 +252,96 @@ class PlannerAgent(BaseAgent):
             log_desc=f"学习材料已生成（{len(context_parts)} 份参考资料）",
         )
         logger.info("[planner:%s] 学习子题 %s 材料已生成", self.agent_id, task.id)
+
+    # ---------- 缺资料自动爬取（设计文档 §2B-3） ----------
+
+    def _should_claim(self, dao: AgentTaskDAO, task: AgentTaskModel) -> bool:
+        """learning_item 在等自动爬取：爬取任务未到终态就先不认领（保持 pending）。
+
+        不消耗重试次数、不产生状态流转——纯粹「下轮巡检再看」。
+        爬取完成/失败/被取消（终态）后子题恢复可认领：失败也照常编材料，
+        只是没爬到新资料。
+        """
+        if task.kind != TaskKind.LEARNING_ITEM:
+            return True
+        cid = (task.payload or {}).get("crawl_task_id")
+        if not cid:
+            return True
+        crawl = dao.get(cid)
+        if crawl is None:
+            return True  # 爬取任务丢了（极端情况），不因此挂死子题
+        return crawl.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+
+    def _auto_crawl_topic(self, db, uid: int, topic: str) -> str | None:
+        """缺资料主题 → 用用户模型选官方文档根地址 → 提交整站浅爬。
+
+        复用「AI 添加」的提示词与提交链路（含 SSRF 校验 + 探活 + 活跃上限），
+        爬取结果入本人个人知识库。自动补爬是增强不是依赖：任何一步失败
+        （模型不给地址 / 探活失败 / 未配置模型 / 活跃任务达上限）都静默放弃，
+        子题照常走「无引用编材料」，绝不阻断任务板。
+
+        :return: crawl 任务 id；放弃返回 None
+        """
+        from generation.prompts import AI_ADD_SYSTEM_PROMPT
+        from service.knowledge_service import (
+            CrawlSubmitError,
+            _parse_ai_add_reply,
+            probe_url,
+            submit_crawl,
+            validate_public_url,
+        )
+
+        try:
+            llm = build_llm_for_user(db, uid)
+            if llm is None:
+                return None
+            reply = llm.chat(
+                [
+                    {"role": "system", "content": AI_ADD_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"我想学习「{topic}」，请帮我爬取相关文档"},
+                ],
+                temperature=0.3,
+            )
+            data = _parse_ai_add_reply(reply)
+            if not data or data.get("action") != "crawl":
+                # 模型认为主题太宽泛/需追问——任务板没有对话轮，直接放弃补爬
+                return None
+            url = validate_public_url(str(data.get("url", "")).strip())
+            ok, final_url, _title = probe_url(url)
+            if not ok:
+                return None
+            try:
+                # 自动场景收紧页数上限（默认 6、最多 10，比手动提交省成本）
+                max_pages = max(1, min(10, int(data.get("max_pages", 6))))
+            except (TypeError, ValueError):
+                max_pages = 6
+            category = (
+                str(data.get("category", "") or "general").strip().lower()[:128] or "general"
+            )
+            task_id = submit_crawl(
+                db, uid=uid, url=final_url, category=category, max_pages=max_pages
+            )
+            logger.info(
+                "[planner] 主题「%s」缺资料，已自动提交爬取：%s", topic, final_url
+            )
+            return task_id
+        except CrawlSubmitError as e:
+            # 活跃爬取任务达上限（409）等：放弃该主题的自动补爬
+            logger.info("[planner] 主题「%s」自动爬取未提交：%s", topic, e)
+            return None
+        except Exception as e:  # noqa: BLE001 —— 补爬失败不阻断拆解
+            logger.warning("[planner] 主题「%s」自动爬取失败（子题照常编材料）：%s", topic, e)
+            return None
+
+    @staticmethod
+    def _search_refs(db, uid: int, topic: str) -> list[dict]:
+        """按主题现检索知识库引用（自动爬取完成后的新资料由此进入材料）"""
+        try:
+            hits = HybridRetriever(db).search(topic, top_k=REFS_PER_TOPIC, uid=uid)
+            return [{"knowledge_id": h.get("knowledge_id")} for h in hits if h.get("knowledge_id")]
+        except Exception as e:  # noqa: BLE001 —— 检索失败则材料不带引用
+            logger.warning("[planner] 主题「%s」检索失败（材料不带引用）：%s", topic, e)
+            return []
 
     # ---------- 知识引用 ----------
 

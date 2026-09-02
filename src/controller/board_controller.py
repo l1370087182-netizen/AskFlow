@@ -48,6 +48,8 @@ def _item_view(t: AgentTaskModel) -> dict:
         "suggestion": payload.get("suggestion", ""),
         "status": t.status,
         "has_material": bool(out.get("material_md")),
+        # 缺资料自动爬取：子题在等爬取任务终态（前端 pending 时显示「爬取资料中」）
+        "waiting_crawl": bool(payload.get("crawl_task_id")),
     }
 
 

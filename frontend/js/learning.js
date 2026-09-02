@@ -100,7 +100,13 @@ function renderGoal(g) {
 function renderItem(it) {
   const row = document.createElement('div');
   row.className = 'kb-row';
-  const [sLabel, sCls] = ITEM_STATUS[it.status] || [it.status, ''];
+  let sLabel, sCls;
+  if (it.waiting_crawl && it.status === 'pending') {
+    // 缺资料自动爬取：等爬取任务终态后才编材料
+    [sLabel, sCls] = ['爬取资料中', 'badge-running'];
+  } else {
+    [sLabel, sCls] = ITEM_STATUS[it.status] || [it.status, ''];
+  }
   row.innerHTML = `
     <span class="row-title"></span>
     <span class="row-right">

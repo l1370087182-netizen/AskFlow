@@ -60,9 +60,19 @@ class BaseAgent(threading.Thread):
             for task in dao.list_claimable(self.KINDS):
                 if self._stopped.is_set():
                     return
+                if not self._should_claim(dao, task):
+                    continue  # 子类判定暂不认领（如 learning_item 等爬取完成）
                 self._try_process(dao, task, db)
         finally:
             db.close()
+
+    def _should_claim(self, dao, task) -> bool:  # noqa: ANN001 —— 钩子无需精确类型
+        """认领前过滤钩子：默认都可认领；子类可按任务 payload 延后认领。
+
+        返回 False 的任务本轮跳过、保持 pending，下轮巡检再看——
+        用于「等外部任务终态再执行」的场景（不消耗重试次数、不写日志）。
+        """
+        return True
 
     def _try_process(self, dao: AgentTaskDAO, task: AgentTaskModel, db) -> None:
         """两层锁认领 + 执行 + 失败分流"""
