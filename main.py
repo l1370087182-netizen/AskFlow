@@ -22,7 +22,7 @@ def create_app():
     from controller.translate_controller import router as translate_router
     from controller.board_controller import router as board_router
 
-    app = FastAPI(title="智能问答系统（学习版）")
+    app = FastAPI(title="问渠 AskFlow —— Agentic RAG 学习系统")
 
     # 前端静态站在 10001 端口（10000 与百度网盘服务冲突，预留兼容），放开跨域
     app.add_middleware(

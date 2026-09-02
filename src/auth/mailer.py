@@ -87,12 +87,12 @@ def send_code(email: str, purpose: Literal["register", "reset"]) -> tuple[bool, 
 
     minutes = settings.CODE_TTL_SEC // 60
     body = (
-        f"你正在{_PURPOSE_ZH[purpose]}智能技术学习系统。\n"
+        f"你正在{_PURPOSE_ZH[purpose]}问渠 AskFlow。\n"
         f"验证码：{code}\n"
         f"{minutes} 分钟内有效，请勿泄露给他人。"
     )
     try:
-        _send_mail(email, f"【技术学习系统】{zh}验证码", body)
+        _send_mail(email, f"【问渠 AskFlow】{zh}验证码", body)
     except Exception as e:  # noqa: BLE001 —— 发送失败给出明确提示，不泄露细节
         logger.exception("[mailer] 验证码邮件发送失败")
         return False, f"验证码邮件发送失败，请稍后重试（{e.__class__.__name__}）"
