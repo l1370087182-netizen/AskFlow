@@ -318,6 +318,25 @@ class AgentTaskDAO:
         self.db.refresh(row)
         return row
 
+    def cancel_task(self, task_id: str, operator: str = "user") -> AgentTaskModel | None:
+        """用户取消（任务板）：pending/in_progress → canceled。
+
+        不带 CAS 条件（用户操作以最新状态为准），但保留状态机白名单约束；
+        已终态的任务返回 None。
+        """
+        row = self.get(task_id)
+        if row is None or row.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+            return None
+        self._assert_transition(row.status, TaskStatus.CANCELED)
+        row.status = TaskStatus.CANCELED
+        row.output = {"canceled": True}
+        row.work_log = (row.work_log or []) + [_log_entry(operator, "cancel", "用户取消")]
+        flag_modified(row, "work_log")
+        flag_modified(row, "output")
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
     # ---------- 超时扫描 ----------
 
     def find_stale(self, timeout_seconds: int) -> list[AgentTaskModel]:

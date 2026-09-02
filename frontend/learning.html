@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>学习任务板 · 智能技术学习系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo"><span class="dot"></span>智能技术学习系统</div>
+      <nav class="nav">
+        <a href="index.html">每日卡片</a>
+        <a href="chat.html">对话学习</a>
+        <a href="kb.html">知识库</a>
+        <a href="interview.html">模拟面试</a>
+        <a href="learning.html" class="active">任务板</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="home-hero">
+      <h1>学习任务板</h1>
+      <p>发布一个学习目标，AI 会拆解成子题并从知识库为你编排学习材料</p>
+    </section>
+
+    <!-- 发布目标 -->
+    <section class="daily-card" style="padding:20px 24px">
+      <div class="ai-input-row" style="max-width:none">
+        <input id="goal-input" maxlength="500" placeholder="如：掌握 FastAPI 的依赖注入 / 搞懂 Redis 持久化…">
+        <button id="btn-goal" class="btn btn-primary" type="button">发布目标</button>
+      </div>
+      <p id="goal-msg" class="row-meta" style="margin-top:10px"></p>
+    </section>
+
+    <!-- 任务板列表 -->
+    <div id="board-state" class="state-box">正在加载…</div>
+    <div id="board-list"></div>
+  </main>
+
+  <!-- 学习材料弹窗 -->
+  <div id="item-modal" class="modal-mask" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="item-title">学习材料</h3>
+        <button id="item-close" class="modal-close" title="关闭">✕</button>
+      </div>
+      <div id="item-meta" class="modal-meta"></div>
+      <div id="item-body" class="modal-body rich"></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/topbar-user.js"></script>
+  <script src="js/highlight.js"></script>
+  <script src="js/learning.js"></script>
+</body>
+</html>

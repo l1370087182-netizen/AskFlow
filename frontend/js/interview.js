@@ -235,6 +235,23 @@ async function genPlan() {
   }
 }
 
+// 面试弱项+缺口直接发布到任务板（确定性拆解，planner 建学习子题）
+async function toBoard() {
+  const btn = document.getElementById('btn-to-board');
+  const msg = document.getElementById('plan-msg');
+  btn.disabled = true;
+  msg.textContent = '发布中…';
+  try {
+    await apiPostJson('/api/board/from-interview', { record_id: currentRecordId });
+    msg.textContent = '✓ 已上任务板';
+    if (confirm('已发布到任务板，现在去查看？')) location.href = 'learning.html';
+  } catch (e) {
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function refreshPlanView() {
   const msg = document.getElementById('plan-msg');
   const view = document.getElementById('plan-view');
@@ -325,6 +342,7 @@ document.getElementById('iv-undo').addEventListener('click', undoLastIv);
 document.getElementById('btn-finish').addEventListener('click', () => send(true));
 document.getElementById('btn-refresh-records').addEventListener('click', loadRecords);
 document.getElementById('btn-gen-plan').addEventListener('click', genPlan);
+document.getElementById('btn-to-board').addEventListener('click', toBoard);
 document.getElementById('record-close').addEventListener('click', closeRecordModal);
 document.getElementById('record-modal').addEventListener('click', (e) => {
   if (e.target.id === 'record-modal') closeRecordModal();
