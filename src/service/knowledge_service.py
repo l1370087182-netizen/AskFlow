@@ -301,6 +301,21 @@ def get_crawl_task(uid: int, task_id: str) -> dict | None:
     return state
 
 
+def get_active_crawl_task(uid: int) -> dict | None:
+    """查询用户当前进行中的爬取任务（恢复进度面板用）；无活跃任务返回 None。
+
+    活跃键只在任务存活期间存在（终态即删，悬挂有 30 分钟 TTL 兜底）；
+    心跳超时的悬挂任务经 get_crawl_task 已置 failed，同样不算活跃。
+    """
+    task_id = _redis().get(ACTIVE_KEY.format(uid=uid))
+    if not task_id:
+        return None
+    state = get_crawl_task(uid, task_id)
+    if state is None or state["status"] not in ("pending", "running"):
+        return None
+    return state
+
+
 # ---------- 后台消费线程 ----------
 
 _worker_started = False

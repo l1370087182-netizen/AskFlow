@@ -482,10 +482,15 @@ a { color: var(--brand); text-decoration: none; }
 .badge-partial { background: var(--amber-soft); color: var(--amber); }
 .badge-failed { background: var(--red-soft); color: var(--red); }
 
-/* 爬取进度面板 */
+/* 分页条（全局列表 / 我的知识列表共用） */
+.kb-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
+.kb-pager:empty { margin-top: 0; }
+.kb-pager button[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* 爬取进度面板（置顶展示，间距留给下方工具栏） */
 .crawl-panel {
   background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
-  padding: 16px 18px; margin-top: 20px; font-size: 13px;
+  padding: 16px 18px; margin: 0 0 18px; font-size: 13px;
 }
 .crawl-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .crawl-head .modal-close { margin-left: auto; }

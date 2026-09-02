@@ -80,7 +80,7 @@ def my_list(
     db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """我的个人知识列表（id 倒序），只出本人条目"""
+    """我的个人知识列表（id 倒序），只出本人条目；total 为真实总数（分页用）"""
     dao = KnowledgeDAO(db)
     rows = dao.list_by_category(
         category=category,
@@ -90,7 +90,7 @@ def my_list(
         user_id=user.id,
     )
     return KnowledgeListResponse(
-        total=len(rows),
+        total=dao.count_by_category(category=category, status=status, user_id=user.id),
         items=[KnowledgeItem.model_validate(r) for r in rows],
     )
 
@@ -148,6 +148,21 @@ def my_crawl_submit(
             detail={"message": e.message, "task_id": e.task_id},
         ) from e
     return {"task_id": task_id, "status": "pending"}
+
+
+@router.get("/my/crawl/active", response_model=CrawlTaskOut)
+def my_crawl_active(
+    user: UserModel = Depends(get_current_user),
+):
+    """当前进行中的爬取任务（前端进入「我的知识」时恢复进度面板）。
+
+    务必声明在 /my/crawl/{task_id} 之前，否则 "active" 被当成 task_id。
+    无活跃任务（含悬挂超时/已终态）统一 404。
+    """
+    state = kb_service.get_active_crawl_task(user.id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="当前没有进行中的爬取任务")
+    return CrawlTaskOut(**state)
 
 
 @router.get("/my/crawl/{task_id}", response_model=CrawlTaskOut)
@@ -286,11 +301,11 @@ def knowledge_detail(
 async def list_knowledge(
     category: str | None = None,
     status: int | None = None,
-    limit: int = 10,
-    offset: int = 0,
+    limit: int = Query(default=10, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """分页查询全局知识列表（仅 user_id==0，安全底线）"""
+    """分页查询全局知识列表（仅 user_id==0，安全底线）；total 为真实总数（分页用）"""
     dao = KnowledgeDAO(db)
 
     rows = dao.list_by_category(
@@ -302,7 +317,9 @@ async def list_knowledge(
     )
     item = [KnowledgeItem.model_validate(r) for r in rows]
     return KnowledgeListResponse(
-        total=len(rows),
+        total=dao.count_by_category(
+            category=category, status=status, user_id=KnowledgeModel.GLOBAL_USER_ID
+        ),
         items=item,
     )
 

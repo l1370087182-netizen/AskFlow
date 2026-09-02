@@ -53,6 +53,22 @@ class KnowledgeDAO:
             q = q.filter(KnowledgeModel.status == status)
         return q.order_by(KnowledgeModel.id.desc()).offset(offset).limit(limit).all()
 
+    def count_by_category(
+        self,
+        category: str | None = None,
+        status: int | None = None,
+        user_id: int = 0,
+    ) -> int:
+        """与 list_by_category 同口径的计数（分页 total 用）"""
+        q = self.db.query(func.count(KnowledgeModel.id)).filter(
+            KnowledgeModel.user_id == user_id
+        )
+        if category:
+            q = q.filter(KnowledgeModel.category == category)
+        if status is not None:
+            q = q.filter(KnowledgeModel.status == status)
+        return q.scalar()
+
     def list_pending(self, limit: int | None = None) -> list[KnowledgeModel]:
         """查询所有待向量化（status=0）的知识，按 id 升序，供向量化流水线使用
 

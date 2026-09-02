@@ -42,22 +42,13 @@
           <span id="kb-list-count" class="rounds"></span>
         </div>
         <div id="kb-list" class="kb-list"></div>
+        <div id="kb-pager" class="kb-pager"></div>
       </section>
     </div>
 
     <!-- ========== 我的知识（个人知识库） ========== -->
     <div id="pane-mine" style="display:none">
-      <div class="my-toolbar">
-        <button id="btn-add" class="btn btn-ghost" type="button">＋ 手工添加</button>
-        <button id="btn-crawl" class="btn btn-ghost" type="button">🕷 爬取整站</button>
-        <button id="btn-ai-add" class="btn btn-ghost" type="button">🤖 AI 添加</button>
-        <span id="my-count" class="row-meta"></span>
-      </div>
-
-      <div id="my-state" class="state-box" style="display:none"></div>
-      <div id="my-list" class="kb-list"></div>
-
-      <!-- 爬取进度面板 -->
+      <!-- 爬取进度面板（置顶：进行中任务最醒目） -->
       <div id="crawl-panel" class="crawl-panel" style="display:none">
         <div class="crawl-head">
           <b>爬取进度</b>
@@ -69,6 +60,17 @@
         <div id="crawl-pages" class="crawl-pages"></div>
         <div id="crawl-summary" class="crawl-summary"></div>
       </div>
+
+      <div class="my-toolbar">
+        <button id="btn-add" class="btn btn-ghost" type="button">＋ 手工添加</button>
+        <button id="btn-crawl" class="btn btn-ghost" type="button">🕷 爬取整站</button>
+        <button id="btn-ai-add" class="btn btn-ghost" type="button">🤖 AI 添加</button>
+        <span id="my-count" class="row-meta"></span>
+      </div>
+
+      <div id="my-state" class="state-box" style="display:none"></div>
+      <div id="my-list" class="kb-list"></div>
+      <div id="my-pager" class="kb-pager"></div>
     </div>
   </main>
 

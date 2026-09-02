@@ -9,6 +9,9 @@ let currentTab = 'global';
 let crawlTimer = null;
 // 正在编辑的条目 id（null = 新建）
 let editingId = null;
+// 分页：每页 10 条；「我的知识」记住当前页，增删改后停在原页刷新
+const PAGE_SIZE = 10;
+let myPage = 1;
 
 // ---------- tab 切换 ----------
 
@@ -21,7 +24,11 @@ function switchTab(tab) {
   document.getElementById('pane-mine').style.display = tab === 'mine' ? '' : 'none';
   // 切 tab 前清轮询，避免后台持续请求
   stopCrawlPolling();
-  if (tab === 'mine') loadMyList();
+  if (tab === 'mine') {
+    loadMyList(1);
+    // 刷新/重进页面后，进行中的爬取任务自动恢复进度面板（置顶显示）
+    resumeActiveCrawl();
+  }
 }
 
 document.getElementById('tab-global').addEventListener('click', () => switchTab('global'));
@@ -56,28 +63,36 @@ async function loadCategories() {
       <b>${c.count}</b>
       <span>${categoryLabel(c.category)}</span>`;
     tile.title = '点击查看该分类的知识';
-    tile.addEventListener('click', () => loadList(c.category, c.count));
+    tile.addEventListener('click', () => loadList(c.category));
     grid.appendChild(tile);
   }
 }
 
-async function loadList(category, count) {
+async function loadList(category, page = 1) {
   const wrap = document.getElementById('kb-list-wrap');
   const listBox = document.getElementById('kb-list');
+  const pagerBox = document.getElementById('kb-pager');
   document.getElementById('kb-list-title').textContent = categoryLabel(category);
-  document.getElementById('kb-list-count').textContent = `${count} 条`;
+  document.getElementById('kb-list-count').textContent = '';
   wrap.style.display = '';
   listBox.innerHTML = '<div class="state-box">加载中…</div>';
+  pagerBox.innerHTML = '';
 
   let data;
   try {
     data = await apiGet(
-      `/api/knowledge/?category=${encodeURIComponent(category)}&limit=200`);
+      `/api/knowledge/?category=${encodeURIComponent(category)}` +
+      `&limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`);
   } catch (e) {
     listBox.innerHTML = '<div class="state-box">加载失败：' + e.message + '</div>';
     return;
   }
 
+  // 页码越界钳制（分类数据变化等极端情况）
+  const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+  if (data.total > 0 && page > pages) return loadList(category, pages);
+
+  document.getElementById('kb-list-count').textContent = `${data.total} 条`;
   listBox.innerHTML = '';
   for (const item of data.items) {
     const row = document.createElement('div');
@@ -90,7 +105,9 @@ async function loadList(category, count) {
     row.addEventListener('click', () => openDetail(item.id));
     listBox.appendChild(row);
   }
-  wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  renderPager(pagerBox, data.total, page, (p) => loadList(category, p));
+  // 仅换分类（第 1 页）时滚动到列表，翻页不打断阅读位置
+  if (page === 1) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function openDetail(id) {
@@ -128,20 +145,28 @@ function closeModal() {
 
 // ---------- 我的知识：列表 ----------
 
-async function loadMyList() {
+async function loadMyList(page = myPage) {
   const listBox = document.getElementById('my-list');
   const stateBox = document.getElementById('my-state');
+  const pagerBox = document.getElementById('my-pager');
   listBox.innerHTML = '';
+  pagerBox.innerHTML = '';
   stateBox.style.display = '';
   stateBox.textContent = '加载中…';
 
   let data;
   try {
-    data = await apiGet('/api/knowledge/my?limit=200');
+    data = await apiGet(
+      `/api/knowledge/my?limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`);
   } catch (e) {
     stateBox.textContent = '加载失败：' + e.message;
     return;
   }
+
+  // 页码越界钳制（如删光末页最后一条）：回到最后一页
+  const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+  if (data.total > 0 && page > pages) return loadMyList(pages);
+  myPage = page;
 
   document.getElementById('my-count').textContent = `共 ${data.total} 条`;
   if (!data.items.length) {
@@ -173,6 +198,7 @@ async function loadMyList() {
     });
     listBox.appendChild(row);
   }
+  renderPager(pagerBox, data.total, page, (p) => loadMyList(p));
 }
 
 async function deleteMy(id, title) {
@@ -253,7 +279,8 @@ async function saveEdit() {
     if (item.status === 2) {
       alert('已保存，但向量化失败（可能是模型服务暂不可用）。可稍后重新编辑保存重试。');
     }
-    loadMyList();
+    // 新建跳第 1 页看新条目（id 倒序）；编辑停在当前页刷新
+    loadMyList(editingId ? myPage : 1);
   } catch (e) {
     setEditMsg(e.message, true);
   } finally {
@@ -344,11 +371,25 @@ function startCrawlPolling(taskId) {
     renderCrawlPanel(task);
     if (['done', 'partial', 'failed'].includes(task.status)) {
       stopCrawlPolling();
-      loadMyList();
+      // 新入库条目排在最前，回第 1 页刷新
+      loadMyList(1);
     }
   };
   tick();
   crawlTimer = setInterval(tick, 2000);
+}
+
+// 进入「我的知识」时恢复进行中的爬取任务（刷新页面后面板不丢）
+async function resumeActiveCrawl() {
+  let task;
+  try {
+    task = await apiGet('/api/knowledge/my/crawl/active');
+  } catch (e) {
+    return; // 404 = 无进行中任务，静默
+  }
+  if (['pending', 'running'].includes(task.status)) {
+    startCrawlPolling(task.task_id);
+  }
 }
 
 const CRAWL_STATUS_LABEL = {
@@ -493,6 +534,33 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------- 小工具 ----------
+
+// 通用分页条：‹ 上一页 / 第 x / y 页 · 共 N 条 / 下一页 ›；单页不渲染
+function renderPager(container, total, page, onPage) {
+  container.innerHTML = '';
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (pages <= 1) return;
+
+  const prev = document.createElement('button');
+  prev.className = 'btn btn-ghost btn-mini';
+  prev.type = 'button';
+  prev.textContent = '‹ 上一页';
+  prev.disabled = page <= 1;
+  prev.addEventListener('click', () => onPage(page - 1));
+
+  const info = document.createElement('span');
+  info.className = 'row-meta';
+  info.textContent = `第 ${page} / ${pages} 页 · 共 ${total} 条`;
+
+  const next = document.createElement('button');
+  next.className = 'btn btn-ghost btn-mini';
+  next.type = 'button';
+  next.textContent = '下一页 ›';
+  next.disabled = page >= pages;
+  next.addEventListener('click', () => onPage(page + 1));
+
+  container.append(prev, info, next);
+}
 
 function statusLabel(status) {
   return status === 1 ? '已向量化' : status === 2 ? '向量化失败' : '待向量化';
