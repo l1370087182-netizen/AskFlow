@@ -14,6 +14,7 @@ import anthropic
 import httpx
 
 from core.config import settings
+from generation.llm import ChatLLM
 
 OCR_PROMPT = (
     "你是 OCR 文字识别引擎。请把这张图片里的文字完整识别出来，"
@@ -57,11 +58,8 @@ class OCRClient:
 
     @staticmethod
     def _resolve_provider(provider: str | None, base_url: str) -> str:
-        """协议识别与 ChatLLM 同规则：显式优先，auto 按地址关键字猜"""
-        p = (provider or "auto").strip().lower()
-        if p in ("openai", "anthropic"):
-            return p
-        return "anthropic" if "anthropic" in base_url.lower() else "openai"
+        """协议识别与 ChatLLM 同一套规则：显式优先，auto 按地址猜"""
+        return ChatLLM._resolve_provider(provider or "auto", base_url)
 
     def recognize(self, image_bytes: bytes, mime: str = "image/png") -> str:
         """识别图片中的文字，返回纯文本（按协议分发，失败线性退避重试）"""
@@ -165,7 +163,6 @@ def build_ocr_client_for_user(db, uid: int) -> OCRClient:
     未配置回退服务端 OCR_*/CHAT_*。双协议均可（openai / anthropic）。
     """
     from DAO.user_dao import UserDAO  # 延迟导入，避免模块级循环依赖
-    from generation.llm import ChatLLM
 
     cfg = UserDAO(db).get_llm_config(uid)
     if cfg["base_url"].strip() and cfg["api_key"].strip():

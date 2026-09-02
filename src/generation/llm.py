@@ -50,13 +50,30 @@ class ChatLLM:
             provider or settings.CHAT_PROVIDER, base
         )
 
+    # auto 模式下已知「URL 不含 anthropic 字样、但实际走 Messages 协议」的端点
+    # （对照 cc-switch 供应商预设 + 火山官方文档，均按后缀匹配；对应的 /v3 结尾
+    # 变体是 OpenAI 兼容入口，不在其中）：
+    # - 火山方舟/BytePlus：Agent Plan /api/plan、Coding Plan /api/coding、
+    #   DouBaoSeed /api/compatible（如 ark.cn-beijing.volces.com/api/plan）
+    # - Kimi For Coding：api.kimi.com/coding（/coding/v1 才是 OpenAI 兼容）
+    _ANTHROPIC_URL_SUFFIXES = (
+        "/api/plan",
+        "/api/coding",
+        "/api/compatible",
+        "api.kimi.com/coding",
+    )
+
     @staticmethod
     def _resolve_provider(provider: str, base_url: str) -> str:
-        """协议识别：显式指定优先；auto 时按地址关键字猜（带 anthropic 走官方协议）"""
+        """协议识别：显式指定优先；auto 时按地址猜（含 anthropic 字样或已知
+        Anthropic 协议端点结尾走 Messages 协议，其余按 OpenAI 兼容）"""
         p = (provider or "auto").strip().lower()
         if p in ("openai", "anthropic"):
             return p
-        return "anthropic" if "anthropic" in base_url.lower() else "openai"
+        u = base_url.lower().rstrip("/")
+        if "anthropic" in u or u.endswith(ChatLLM._ANTHROPIC_URL_SUFFIXES):
+            return "anthropic"
+        return "openai"
 
     # ---------- 统一入口 ----------
 

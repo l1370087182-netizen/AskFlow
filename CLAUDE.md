@@ -300,7 +300,7 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - `generation/llm.py` 的 `ChatLLM` 支持两种协议，由 `.env` 配置切换，用户可自由填入任意服务商的地址与密钥：
   - `CHAT_PROVIDER=openai`：OpenAI 兼容协议（SiliconFlow、DeepSeek、Moonshot、OpenAI 等），httpx 直连 `POST /chat/completions`
   - `CHAT_PROVIDER=anthropic`：Anthropic Messages 协议（Claude 官方或中转站），走官方 `anthropic` SDK 的 `messages.stream`
-  - `CHAT_PROVIDER=auto`（默认）：按 `CHAT_BASE_URL` 识别——地址含 `anthropic` 走 Messages 协议，否则按 OpenAI 兼容
+  - `CHAT_PROVIDER=auto`（默认）：按 `CHAT_BASE_URL` 识别——地址含 `anthropic`，或以已知 Anthropic 协议端点结尾（火山方舟 Agent Plan `/api/plan`、Coding Plan `/api/coding`、DouBaoSeed `/api/compatible`、Kimi For Coding `api.kimi.com/coding`；对应 `/v3`、`/v1` 结尾变体是 OpenAI 兼容）走 Messages 协议，否则按 OpenAI 兼容
 - 协议差异在 `ChatLLM` 内部屏蔽，上层（`chain.py` / `chat_controller.py`）不感知：
   - OpenAI 风格的 `messages`（含 system 角色）发给 Anthropic 时自动转换：system 抽成独立参数、连续同角色消息合并（费曼结束轮有连续 user）、`max_tokens` 必填、新 Claude 模型不接受 `temperature` 故 anthropic 路径不传
 - 新增依赖：`anthropic`（官方 SDK）；本地无 Claude 密钥时可用 `scripts/mock_anthropic_server.py` 起 mock 服务验证 anthropic 路径

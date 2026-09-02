@@ -6,8 +6,9 @@ from pydantic import BaseModel, Field
 class LLMConfig(BaseModel):
     """用户自定义大模型接入配置（前端设置，随请求透传）
 
-    base_url + api_key 都填了才生效；协议 auto 时按地址识别（含 anthropic 走
-    Anthropic Messages，否则 OpenAI 兼容）。
+    base_url + api_key 都填了才生效；协议 auto 时按地址识别（含 anthropic
+    或已知 Anthropic 端点结尾——火山方舟 /api/plan、/api/coding、/api/compatible
+    与 Kimi api.kimi.com/coding——走 Anthropic Messages，否则 OpenAI 兼容）。
     """
 
     provider: Literal["auto", "openai", "anthropic"] = "auto"
