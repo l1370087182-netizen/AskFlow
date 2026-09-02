@@ -67,7 +67,7 @@ class OCRClient:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        last_err: Exception | None = None
+        last_err: str | Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = httpx.post(
@@ -75,8 +75,13 @@ class OCRClient:
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"].strip()
+            except httpx.HTTPStatusError as e:
+                # 带上响应体：模型未开通/不支持图片等平台提示要能直接看到
+                last_err = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+                if e.response.status_code in (401, 403):
+                    break  # 鉴权/授权错误，重试不会变好
             except Exception as e:  # noqa: BLE001 —— 视觉服务偶发 5xx，走重试
                 last_err = e
-                if attempt < self.max_retries:
-                    time.sleep(attempt)
-        raise RuntimeError(f"OCR 识别失败（重试 {self.max_retries} 次）: {last_err}")
+            if attempt < self.max_retries:
+                time.sleep(attempt)
+        raise RuntimeError(f"OCR 识别失败: {last_err}")

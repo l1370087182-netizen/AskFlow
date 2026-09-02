@@ -50,8 +50,14 @@ async function start() {
       method: 'POST', body: fd, headers: authHeaders(),
     });
     if (resp.status === 401) { handleAuthError(resp); return; }
-    d = await resp.json();
-    if (!resp.ok) throw new Error(d.detail || 'start 失败');
+    // 先读文本再解析：后端异常时可能返回非 JSON，直接 .json() 会崩
+    const raw = await resp.text();
+    try { d = JSON.parse(raw); } catch (_) { d = null; }
+    if (!resp.ok) {
+      const detail = d && d.detail;
+      throw new Error(typeof detail === 'string' ? detail : (raw || `HTTP ${resp.status}`));
+    }
+    if (!d) throw new Error('响应不是有效 JSON');
   } catch (e) {
     err.textContent = e.message; btn.disabled = false; btn.textContent = '开始面试';
     return;

@@ -19,8 +19,8 @@ from sqlalchemy.orm import Session
 
 from auth.deps import get_current_user
 from DAO.tech_term_dao import TechTermDAO
-from database.session import SessionLocal
-from generation.llm import ChatLLM
+from database.session import SessionLocal, get_db
+from generation.llm import ChatLLM, build_llm_for_user
 from interview.analyzer import InterviewAnalyzer
 from interview.prompts import (
     FINAL_ASSESS_PROMPT,
@@ -83,18 +83,47 @@ def _recommend(gap: list[str], db: Session) -> list[dict]:
 def start(
     jd: UploadFile = File(..., description="JD 截图"),
     resume: UploadFile = File(..., description="简历截图"),
+    db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """上传双图，返回面试会话与第一个问题（会话存当前用户目录）"""
-    jd_text = _ocr(jd)
-    resume_text = _ocr(resume)
+    """上传双图，返回面试会话与第一个问题（会话存当前用户目录）。
+
+    每一步异常都兜成 JSON 错误（含真实原因），杜绝裸 500 纯文本。
+    """
+    uid = user.id
+
+    # 1) OCR：视觉模型走服务端 OCR_* 配置（个人配置无法保证支持图片）
+    try:
+        jd_text = _ocr(jd)
+        resume_text = _ocr(resume)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"截图文字识别（OCR）失败：{e}。"
+                "请检查服务端 .env 的 OCR_MODEL 是否为已开通的视觉模型"
+            ),
+        ) from e
     if not jd_text.strip():
         raise HTTPException(status_code=422, detail="JD 未识别出文字")
 
-    uid = user.id
-    llm = ChatLLM()
-    jd_analysis = JDAnalyzer().analyze(jd_text)
-    resume = InterviewAnalyzer(llm).extract_resume(resume_text)
+    # 2) LLM：与对话一致——用户个人配置优先，未配置回退服务端默认
+    try:
+        llm = build_llm_for_user(db, uid) or ChatLLM()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{e}；可到「对话学习」页 ⚙️ 配置个人模型",
+        ) from e
+
+    # 3) JD 分析 + 简历结构化
+    try:
+        jd_analysis = JDAnalyzer(llm).analyze(jd_text)
+        resume = InterviewAnalyzer(llm).extract_resume(resume_text)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"JD/简历分析失败：{e}") from e
 
     # 强随机 id（弃用秒级时间戳，消除同秒碰撞；目录隔离后他人也无法访问）
     session_id = f"iv-{secrets.token_urlsafe(12)}"
@@ -105,14 +134,17 @@ def start(
         {"messages": [], "meta": {"jd_analysis": jd_analysis, "resume": resume, "rounds": 0}},
     )
 
-    analyzer = InterviewAnalyzer()
-    first = llm.chat(
-        [
-            {"role": "system", "content": _system(jd_analysis, resume, 0)},
-            {"role": "user", "content": FIRST_QUESTION_PROMPT},
-        ],
-        temperature=0.5,
-    )
+    # 4) 首问生成
+    try:
+        first = llm.chat(
+            [
+                {"role": "system", "content": _system(jd_analysis, resume, 0)},
+                {"role": "user", "content": FIRST_QUESTION_PROMPT},
+            ],
+            temperature=0.5,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{e}") from e
     data = load_session(uid, session_id, "interview")
     data["messages"].append({"role": "assistant", "content": first})
     save_session(uid, session_id, "interview", data)
@@ -139,8 +171,9 @@ def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
 
     def generate() -> Generator[str, None, None]:
         db = SessionLocal()
-        llm = ChatLLM()
         try:
+            # 个人配置优先；构造放 try 内，配置缺失走 SSE error 而非裸 500
+            llm = build_llm_for_user(db, uid) or ChatLLM()
             session = load_session(uid, body.session_id, "interview")
             meta = session.get("meta", {})
             jd_analysis = meta.get("jd_analysis", {})

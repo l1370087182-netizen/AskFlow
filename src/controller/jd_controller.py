@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from DAO.jd_dao import JDDAO
 from auth.deps import get_current_user
 from database.session import get_db
+from generation.llm import build_llm_for_user
 from jd_analyzer.analyzer import JDAnalyzer
 from model.UserModel import UserModel
 from ocr.ocr_client import OCRClient
@@ -68,8 +69,8 @@ def analyze_jd(
         if not ocr_text.strip():
             raise HTTPException(status_code=422, detail="OCR 未识别出任何文字")
 
-        # 4) LLM 提取结构化技术栈
-        analyzer = JDAnalyzer()
+        # 4) LLM 提取结构化技术栈（个人配置优先，未配置回退服务端默认）
+        analyzer = JDAnalyzer(build_llm_for_user(db, user.id))
         result = analyzer.analyze(ocr_text)
 
         # 5) 落库
