@@ -206,6 +206,7 @@ class AgentTaskDAO:
         flag_modified(row, "work_log")
         self.db.commit()
         self.db.refresh(row)
+        self._notify_terminal(row, status)
         return row
 
     def heartbeat(self, task_id: str, agent_id: str) -> bool:
@@ -323,6 +324,7 @@ class AgentTaskDAO:
         flag_modified(row, "work_log")
         self.db.commit()
         self.db.refresh(row)
+        self._notify_terminal(row, TaskStatus.FAILED)
         return row
 
     def cancel_task(self, task_id: str, operator: str = "user") -> AgentTaskModel | None:
@@ -387,6 +389,30 @@ class AgentTaskDAO:
         )
 
     # ---------- 超时扫描 ----------
+
+    @staticmethod
+    def _notify_terminal(row: "AgentTaskModel", status: str) -> None:
+        """终态通知挂钩：尽力而为，绝不影响任务状态流转。
+
+        传纯数据快照给通知服务（其内部用独立 Session 写入）——
+        避免通知写入异常污染当前会话（producer 写回后紧接建质检子任务）。
+        延迟 import 防模块级循环依赖。
+        """
+        try:
+            from service.notification_service import notify_task_terminal
+
+            notify_task_terminal({
+                "id": row.id,
+                "kind": row.kind,
+                "user_id": row.user_id,
+                "status": status,
+                "assignee": row.assignee,
+                "parent_id": row.parent_id,
+                "payload": dict(row.payload or {}),
+                "output": dict(row.output or {}),
+            })
+        except Exception:  # noqa: BLE001 —— 通知失败静默，状态流转不受影响
+            pass
 
     def find_stale(self, timeout_seconds: int) -> list[AgentTaskModel]:
         """心跳超时的执行中任务（回收器用）"""

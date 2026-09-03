@@ -181,15 +181,18 @@ def list_board(
     db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """任务板视图：目标（含子题进度），按时间倒序。"""
+    """任务板视图：目标（含子题进度），按创建时间倒序（新任务置顶）。
+
+    注意：任务 id 是随机 hex，不能按 id 排序——必须 created_at。
+    """
     goals = (
         db.query(AgentTaskModel)
         .filter(
             AgentTaskModel.user_id == user.id,
             AgentTaskModel.kind == TaskKind.LEARNING_GOAL,
         )
-        .order_by(AgentTaskModel.id.desc())
-        .limit(20)
+        .order_by(AgentTaskModel.created_at.desc(), AgentTaskModel.id.desc())
+        .limit(100)
         .all()
     )
     goal_ids = [g.id for g in goals]
@@ -239,7 +242,7 @@ def list_board(
                 for t in item_rows
             ],
         })
-    return {"goals": out}
+    return {"goals": out, "total": len(out)}
 
 
 @router.get("/tasks/{task_id}")
@@ -248,7 +251,10 @@ def task_detail(
     db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """任务详情（learning_item 看材料 / learning_goal 看拆解结果）。"""
+    """任务详情（learning_item 看材料 / learning_goal 看拆解结果）。
+
+    work_log 一并透出（work_log 查看器数据源；归属校验已挡住越权）。
+    """
     task = AgentTaskDAO(db).get(task_id)
     if not task or task.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到该任务")
@@ -258,6 +264,7 @@ def task_detail(
         "status": task.status,
         "payload": task.payload or {},
         "output": task.output or {},
+        "work_log": task.work_log or [],
         "created_at": task.created_at.isoformat() if task.created_at else None,
     }
 
@@ -334,6 +341,120 @@ def cancel_task(
     if canceled == 0:
         raise HTTPException(status_code=400, detail="任务已结束，无需取消")
     return {"canceled": canceled}
+
+
+# ---------- 删除目标（整目标级联） ----------
+
+def _collect_goal_tree(db: Session, goal_id: str) -> set[str]:
+    """多源 BFS 收集目标关联的整棵树（应连带删除的任务行）。
+
+    种子 = goal + 其子题 + 各子题引用的爬取/检索任务；
+    再沿 parent_id 边向下到底：web_search → 子 crawl → quality_review → term_curate。
+    一跳 parent_id 收不全质检链，必须递归。
+    """
+    ids: set[str] = {goal_id}
+    queue: list[str] = []
+    for it in (
+        db.query(AgentTaskModel)
+        .filter(AgentTaskModel.parent_id == goal_id)
+        .all()
+    ):
+        if it.id not in ids:
+            ids.add(it.id)
+            queue.append(it.id)
+        cid = (it.payload or {}).get("crawl_task_id", "")
+        if cid and cid not in ids:
+            ids.add(cid)
+            queue.append(cid)
+    while queue:
+        pid = queue.pop()
+        for c in (
+            db.query(AgentTaskModel)
+            .filter(AgentTaskModel.parent_id == pid)
+            .all()
+        ):
+            if c.id not in ids:
+                ids.add(c.id)
+                queue.append(c.id)
+    return ids
+
+
+def _purge_tasks(db: Session, dao: AgentTaskDAO, ids: set[str], uid: int) -> tuple[int, int]:
+    """先取消运行中的（停执行端），再删除任务行。返回 (删除数, 取消数)"""
+    if not ids:
+        return 0, 0
+    rows = [r for r in dao.list_by_ids(list(ids)) if r.user_id == uid]
+    canceled = 0
+    for r in rows:
+        if r.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+            if dao.cancel_task(r.id):
+                canceled += 1
+    for r in rows:
+        db.delete(r)
+    db.commit()
+    return len(rows), canceled
+
+
+@router.delete("/tasks/{task_id}")
+def delete_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """删除整个学习目标：级联删除子题与整条爬取/检索/质检链 + 相关通知。
+
+    - 运行中的任务先取消再删（执行侧探针会尽快停下）
+    - 已爬入知识库的内容保留（与取消语义一致）
+    - 删除后再补一次同条件清扫：压掉「planner 并发建子题」的孤儿窗口
+    - goal 行任何状态可删；非 goal 任务不允许从这里删
+    """
+    dao = AgentTaskDAO(db)
+    goal = dao.get(task_id)
+    if not goal or goal.user_id != user.id:
+        raise HTTPException(status_code=404, detail="未找到该任务")
+    if goal.kind != TaskKind.LEARNING_GOAL:
+        raise HTTPException(status_code=400, detail="仅支持删除学习目标（子题随目标整体删除）")
+
+    ids = _collect_goal_tree(db, task_id)
+    deleted, canceled = _purge_tasks(db, dao, ids, user.id)
+
+    # 二次清扫：收集与删除之间 planner 可能刚建好的子题（残余窗口书面接受）
+    leftovers = _collect_goal_tree(db, task_id) - ids
+    if leftovers:
+        d2, c2 = _purge_tasks(db, dao, leftovers, user.id)
+        deleted += d2
+        canceled += c2
+        ids |= leftovers
+
+    # 相关通知清理（费曼/面试通知的 ref_id 是会话/记录 id，不受影响）
+    try:
+        from DAO.notification_dao import NotificationDAO
+
+        NotificationDAO(db).delete_by_refs(user.id, list(ids))
+    except Exception:  # noqa: BLE001 —— 通知清理失败不阻断删除
+        logger.warning("[board] 删除目标时通知清理失败", exc_info=True)
+
+    # Redis 进度键尽力清理（执行端可能补写终态，残留无害：无读路再触达）
+    try:
+        from service.knowledge_service import TASK_KEY, _redis
+
+        r = _redis()
+        for tid in ids:
+            r.delete(TASK_KEY.format(task_id=tid))
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {"deleted": deleted, "canceled": canceled}
+
+
+@router.get("/agents")
+def agents_status(
+    user: UserModel = Depends(get_current_user),
+):
+    """各 agent 实时状态（任务板活动面板）；他人任务细节由 manager 屏蔽。"""
+    from agent_engine.manager import agent_statuses
+
+    return {"agents": agent_statuses(user.id)}
 
 
 def _count_active_goals(db: Session, user_id: int) -> int:

@@ -20,24 +20,44 @@
     </div>
   </header>
 
-  <main class="container">
-    <section class="home-hero">
-      <h1>学习任务板</h1>
-      <p>发布一个学习目标，AI 会拆解成子题并从知识库为你编排学习材料</p>
-    </section>
+  <!-- 三栏：左=Agent 动态 / 中=任务板 / 右=任务日志（窄屏隐藏两侧栏） -->
+  <main class="container board-layout">
+    <aside class="board-aside">
+      <section class="daily-card aside-card">
+        <h3 class="aside-title">🤖 Agent 动态</h3>
+        <div id="agents-list"></div>
+      </section>
+    </aside>
 
-    <!-- 发布目标 -->
-    <section class="daily-card" style="padding:20px 24px">
-      <div class="ai-input-row" style="max-width:none">
-        <input id="goal-input" maxlength="500" placeholder="如：掌握 FastAPI 的依赖注入 / 搞懂 Redis 持久化…">
-        <button id="btn-goal" class="btn btn-primary" type="button">发布目标</button>
-      </div>
-      <p id="goal-msg" class="row-meta" style="margin-top:10px"></p>
-    </section>
+    <div class="board-main">
+      <section class="home-hero">
+        <h1>学习任务板</h1>
+        <p>发布一个学习目标，AI 会拆解成子题并从知识库为你编排学习材料</p>
+      </section>
 
-    <!-- 任务板列表 -->
-    <div id="board-state" class="state-box">正在加载…</div>
-    <div id="board-list"></div>
+      <!-- 发布目标 -->
+      <section class="daily-card" style="padding:20px 24px">
+        <div class="ai-input-row" style="max-width:none">
+          <input id="goal-input" maxlength="500" placeholder="如：掌握 FastAPI 的依赖注入 / 搞懂 Redis 持久化…">
+          <button id="btn-goal" class="btn btn-primary" type="button">发布目标</button>
+        </div>
+        <p id="goal-msg" class="row-meta" style="margin-top:10px"></p>
+      </section>
+
+      <!-- 任务板列表 + 分页 -->
+      <div id="board-state" class="state-box">正在加载…</div>
+      <div id="board-list"></div>
+      <div id="board-pager" class="kb-pager"></div>
+    </div>
+
+    <aside class="board-aside">
+      <section class="daily-card aside-card">
+        <h3 class="aside-title">📜 任务日志</h3>
+        <div id="worklog-body">
+          <p class="row-meta">点击任务的「日志」按钮，或点左侧 Agent 正在处理的任务，在这里查看它的完整工作日志。</p>
+        </div>
+      </section>
+    </aside>
   </main>
 
   <!-- 学习材料弹窗 -->

@@ -64,10 +64,13 @@ class PlannerAgent(BaseAgent):
 
     def process(self, task, db) -> None:
         if task.kind == TaskKind.STUDY_PLAN:
+            self._note("生成学习计划")
             self._process_study_plan(task, db)
         elif task.kind == TaskKind.LEARNING_GOAL:
+            self._note(f"拆解目标：{str((task.payload or {}).get('goal', ''))[:30]}")
             self._process_goal(task, db)
         elif task.kind == TaskKind.LEARNING_ITEM:
+            self._note(f"编写材料：{str((task.payload or {}).get('topic', ''))[:30]}")
             self._process_item(task, db)
 
     # ---------- ① 面试记录 → 学习计划（面试页入口） ----------

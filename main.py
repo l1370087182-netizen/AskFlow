@@ -21,6 +21,7 @@ def create_app():
     from controller.user_controller import router as user_router
     from controller.translate_controller import router as translate_router
     from controller.board_controller import router as board_router
+    from controller.notification_controller import router as notification_router
 
     app = FastAPI(title="问渠 AskFlow —— Agentic RAG 学习系统")
 
@@ -53,6 +54,7 @@ def create_app():
         user_router,
         translate_router,
         board_router,
+        notification_router,
     ):
         app.include_router(r, dependencies=_auth)
 

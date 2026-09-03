@@ -217,7 +217,7 @@ def _chat_teach(
             {"topic": meta["topic"], "rounds": cur_rounds, "evaluation": evaluation}
         )
         try:
-            save_evaluation(
+            eval_row = save_evaluation(
                 db,
                 user_id=uid,
                 session_id=body.session_id,
@@ -227,6 +227,17 @@ def _chat_teach(
             )
         except Exception:  # noqa: BLE001
             logger.exception("[chat] 评分落库失败")
+            eval_row = None
+        if eval_row is not None:
+            # 评分通知（尽力而为）：点通知可跳回本会话
+            try:
+                from service.notification_service import notify_evaluation
+
+                notify_evaluation(
+                    uid, body.session_id, meta["topic"], cur_rounds, eval_row.score
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[chat] 评分通知发送失败")
         # 保留完整对话历史（持久化，侧边栏可见）；只清主题状态以便下次开新主题
         for key in ("topic", "reference", "rounds"):
             meta.pop(key, None)

@@ -249,6 +249,16 @@ def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
                     )
                     db.add(rec)
                     db.commit()
+                    # 总评通知（尽力而为，在同一 try 内：落库失败则一并不发）
+                    try:
+                        from service.notification_service import notify_interview
+
+                        notify_interview(
+                            uid, rec.id, rec.jd_title,
+                            len(rec.weaknesses or []), len(rec.gap_topics or []),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[interview] 总评通知发送失败")
                     yield _sse({"type": "record", "record_id": rec.id})
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[interview] 面试记录落库失败：%s", e)

@@ -93,18 +93,21 @@ project/
     │   ├── chat_controller.py      # 问答接口（讲解/费曼双模式）✅
     │   ├── interview_controller.py # 模拟面试（JD+简历双图）✅
     │   ├── auth_controller.py      # 注册/登录/忘记密码/当前用户 ✅（唯一免鉴权）
-    │   └── user_controller.py      # 用户私有模型配置 /api/user/llm ✅
+    │   ├── user_controller.py      # 用户私有模型配置 /api/user/llm ✅
+    │   └── notification_controller.py # 站内通知：列表/未读数/批量已读/批量删除 ✅
     ├── service/             # 业务逻辑层
     │   ├── spider_service.py
     │   ├── knowledge_service.py
     │   ├── jd_service.py
-    │   └── evaluate_service.py
+    │   ├── evaluate_service.py
+    │   └── notification_service.py # 事件→通知映射（独立 Session 写入，绝不阻塞主流程）✅
     ├── dao/                 # 数据访问层（现目录名 DAO/）
     │   ├── knowledge_dao.py
     │   ├── jd_dao.py
     │   ├── evaluate_dao.py
     │   ├── tech_term_dao.py
-    │   └── user_dao.py             # 用户账号/改密/私有模型配置 ✅
+    │   ├── user_dao.py             # 用户账号/改密/私有模型配置 ✅
+    │   └── notification_dao.py     # 站内通知（列表/已读/删除/裁旧，每用户留 200）✅
     ├── database/            # engine、sessionmaker、Base、get_db
     │   └── session.py
     ├── model/               # ORM 数据模型
@@ -113,7 +116,8 @@ project/
     │   ├── TechStackModel.py
     │   ├── EvaluateModel.py        # +user_id（阶段11）
     │   ├── TechTermModel.py
-    │   └── UserModel.py            # 用户账号+私有模型配置 ✅（阶段11）
+    │   ├── UserModel.py            # 用户账号+私有模型配置 ✅（阶段11）
+    │   └── NotificationModel.py    # 站内通知表 ✅（阶段13）
     ├── schema/              # Pydantic DTO
     │   ├── knowledge.py ✅
     │   ├── jd.py
@@ -200,6 +204,7 @@ project/
 - **evaluate（费曼讲解评分记录，阶段 9）**：`session_id`、`topic`、`rounds`（追问轮数）、`score`（0-10，可空）、`summary`（总结复述）、`correct_points` / `wrong_points` / `missed_points`（JSON 数组）、`raw`（评分 markdown 原文）。由对话接口在评分产生时联动写入。**阶段 11 加 `user_id` 列（可空、索引），按用户隔离；存量行留 NULL 作废。**
 - **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=用服务端默认）、`created_at` / `updated_at`。
 - **jd 表（阶段 11 补 `user_id` 列）**：同 evaluate，按用户隔离，存量行留 NULL 作废。
+- **notification（站内通知，阶段 13）**：`user_id`、`type`（task_done/task_failed/evaluation/interview）、`title` / `body` / `link`（前端深链接）、`ref_id`（关联任务/会话/记录，删目标时按它清通知）、`is_read`、`created_at`。写入挂钩在 `agent_task_dao.write_back/fail_task` 尾部（CAS 保证每终态恰触发一次）+ 费曼评分/面试总评落库点；通知用**独立 Session** 写入（防污染任务会话）；每用户保留最近 200 条。
 
 ---
 
@@ -220,6 +225,7 @@ project/
 | 10 | 前端 | ✅ 完成 | 原生 HTML/CSS/JS：主页（每日卡片+跳转）+ 对话页（双模式切换、SSE 流式、评分卡片），端口 10001 |
 | 11 | 用户鉴权 + 数据隔离 | ✅ 完成 | 邮箱验证码注册/登录/忘记密码；对话/评估/面试/模型配置按用户隔离；仅新增 PyJWT 依赖 |
 | 12 | 相关度阈值 + 联网搜索补爬 + 任务治理 | ✅ 完成 | 阈值判「无资料」；博查联网补爬（SearcherAgent，异步）；取消真正生效（CAS+探针+级联）；任务板进度条 |
+| 13 | 任务板体验 + 通知中心 + Agent 可视化 | ✅ 完成 | 任务板分页/抽屉/删除目标（级联）+ 排序修复（created_at）；站内通知（铃铛/红点/批量已读删除/深链跳转）；Agent 活动面板 + work_log 查看器 |
 
 ### 爬虫模块已完成部分清点
 
@@ -400,6 +406,12 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 | 评估 | GET | `/api/evaluate/` | 评分记录列表，可按 topic 过滤（阶段 9，按用户隔离） |
 | 评估 | GET | `/api/evaluate/stats` | 聚合统计：总条数/平均分/各主题掌握情况（阶段 9，按用户） |
 | 评估 | GET | `/api/evaluate/{id}` | 单条评分详情（阶段 9，越权返 404） |
+| 任务板 | GET | `/api/board/` | 任务树视图（created_at 倒序，子题附 crawl_progress 进度条数据） |
+| 任务板 | POST | `/api/board/tasks/{id}/cancel` | 取消目标/子题，级联取消爬取/检索链 |
+| 任务板 | DELETE | `/api/board/tasks/{id}` | 删除整个目标：级联删子题+爬取/检索/质检链+相关通知（已爬知识保留） |
+| 任务板 | GET | `/api/board/agents` | 各 Agent 实时状态（活动面板；他人任务细节屏蔽） |
+| 通知 | GET | `/api/notification/` `/unread-count` | 通知列表（含未读数）/ 轻量未读数（红点轮询） |
+| 通知 | POST | `/api/notification/read` `/delete` | 批量已读/批量删除（ids 或 all） |
 | 鉴权 | POST | `/api/auth/send-code` | 发送邮箱验证码（注册/重置，免鉴权） |
 | 鉴权 | POST | `/api/auth/register` | 邮箱验证码注册，返回 token（免鉴权） |
 | 鉴权 | POST | `/api/auth/login` | 登录，返回 token（免鉴权） |

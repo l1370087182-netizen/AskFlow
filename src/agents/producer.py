@@ -78,6 +78,9 @@ class ProducerAgent(BaseAgent):
                 state["current_url"] = page["url"]
                 state["heartbeat"] = time.time()
                 _try_save(r, state)
+                # 活动面板文案：第几页 / 爬到哪
+                idx = state["done_pages"] + state["failed_pages"] + state["skipped_pages"] + 1
+                self._note(f"第 {idx}/{state['max_pages']} 页：{page['url'][:40]}")
                 # 取消检查点 1（页头）：心跳命中 0 行 = 被取消/回收，立即终止。
                 # 取消不回滚已入库数据：此前 upsert 的页面保留在知识库。
                 if not dao.heartbeat(task.id, self.agent_id):
@@ -108,6 +111,7 @@ class ProducerAgent(BaseAgent):
 
                 # AI 清洗（失败自动回退原文）→ upsert → 即时向量化
                 title = page.get("title") or page["url"]
+                self._note(f"AI 清洗入库中：{str(title)[:30]}")
                 cleaned_text, cleaned = clean_page_content(llm, title, page["content"])
                 row = KnowledgeDAO(db).upsert(
                     title=title,

@@ -61,6 +61,7 @@ class SearcherAgent(BaseAgent):
 
         # 2) 进度态开局：searching（前端不定长动画条）
         state = self._save_state(r, task, {"status": "searching", "phase": "生成检索词"})
+        self._note(f"生成检索词：{topic[:30]}")
 
         # 3) 搜索 + 选页（每阶段间心跳：防 reaper 误回收 + 取消探针）
         try:
@@ -68,6 +69,7 @@ class SearcherAgent(BaseAgent):
                 return
             queries = generate_queries(llm, topic)
             state["phase"] = "搜索候选网页"
+            self._note(f"搜索候选网页：{topic[:30]}")
             _try_save(r, state)
 
             candidates: list[dict] = []
@@ -89,6 +91,7 @@ class SearcherAgent(BaseAgent):
             if not self._check_alive(dao, r, task, state):
                 return
             state["phase"] = "筛选有价值网页"
+            self._note(f"筛选候选网页：{len(candidates)} 条")
             _try_save(r, state)
             selected = filter_candidates(llm, db, task.user_id, topic, candidates)
         except Exception as e:  # noqa: BLE001 —— 意外异常：进度态置失败后走引擎重试

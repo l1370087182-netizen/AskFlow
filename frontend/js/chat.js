@@ -556,6 +556,7 @@ async function boot() {
   const urlMode = params.get('mode');
   const q = params.get('q');
   const topic = params.get('topic');
+  const deepSession = params.get('session');
 
   // 模式：URL 参数优先；刷新（无参数）时恢复上次使用的模式
   if (urlMode === 'teach' || urlMode === 'ask') {
@@ -566,8 +567,23 @@ async function boot() {
   localStorage.setItem('rag_mode', mode);
   currentId = getCur(mode);   // 该模式自己的当前会话
 
-  // 从知识卡片「去问 AI / 我来教」进入：默认新建对话，除非当前（该模式）对话是空白的
-  if (q || topic) {
+  // 通知深链接：?session=xxx 落到指定会话（需与 &mode= 同用）
+  if (deepSession) {
+    let exists = false;
+    try {
+      const data = await apiGet('/api/chat/sessions');
+      exists = (data.sessions || []).some(
+        (s) => s.session_id === deepSession && s.mode === mode
+      );
+    } catch (e) { /* 查询失败按不存在处理 */ }
+    if (exists) {
+      currentId = deepSession;
+      localStorage.setItem('rag_cur_' + mode, deepSession);
+    } else {
+      alert('该会话不存在或已删除');
+    }
+  } else if (q || topic) {
+    // 从知识卡片「去问 AI / 我来教」进入：默认新建对话，除非当前（该模式）对话是空白的
     const blank = await isBlank(currentId, mode);
     if (!blank) {
       currentId = newSessionId();
@@ -576,7 +592,7 @@ async function boot() {
   }
 
   // 跳转参数处理完立即清掉，刷新不会重复提问
-  if (q || topic || urlMode) {
+  if (q || topic || urlMode || deepSession) {
     history.replaceState(null, '', location.pathname);
   }
 

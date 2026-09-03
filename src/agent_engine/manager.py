@@ -33,6 +33,61 @@ _start_lock = threading.Lock()
 _agents: list[BaseAgent] = []
 _reaper: TimeoutReaper | None = None
 
+# Agent 类 → 中文角色名（任务板活动面板展示）
+_ROLE_ZH = {
+    "ProducerAgent": "爬取生产",
+    "SearcherAgent": "联网检索",
+    "ReviewerAgent": "知识质检",
+    "CuratorAgent": "术语整理",
+    "PlannerAgent": "学习规划",
+}
+
+
+def agent_statuses(viewer_id: int) -> list[dict]:
+    """全部 agent 的状态快照（任务板活动面板数据源）。
+
+    隐私：agent 是全局的，正在处理的任务若属于其他用户（或行已删），
+    只暴露 status，不暴露 task_id/desc（防止跨用户泄漏 URL/主题）。
+    """
+    from DAO.agent_task_dao import AgentTaskDAO
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        dao = AgentTaskDAO(db)
+        out = []
+        for agent in _agents:
+            act = getattr(agent, "activity", None) or {}
+            item = {
+                "agent_id": agent.agent_id,
+                "role": _ROLE_ZH.get(agent.__class__.__name__, agent.__class__.__name__),
+                "status": act.get("status", "idle"),
+                "task_id": "",
+                "kind": "",
+                "desc": "",
+                "since": act.get("since", 0),
+            }
+            if item["status"] == "working" and act.get("task_id"):
+                row = dao.get(act["task_id"])
+                if row is not None and row.user_id == viewer_id:
+                    item["task_id"] = row.id
+                    item["kind"] = row.kind
+                    item["desc"] = act.get("desc", "")
+            out.append(item)
+        # reaper 不是 BaseAgent，手工拼一条
+        out.append({
+            "agent_id": "reaper-01",
+            "role": "超时回收",
+            "status": "watching",
+            "task_id": "",
+            "kind": "",
+            "desc": "巡检心跳超时的任务并回收",
+            "since": 0,
+        })
+        return out
+    finally:
+        db.close()
+
 
 def start_agent_engine() -> None:
     """幂等启动整个 Agent 引擎"""

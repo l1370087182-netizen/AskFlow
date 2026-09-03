@@ -38,6 +38,7 @@ class CuratorAgent(BaseAgent):
 
     def process(self, task, db) -> None:
         knowledge_ids = (task.payload or {}).get("knowledge_ids", [])
+        self._note(f"提炼术语：{len(knowledge_ids)} 篇知识")
         dao = AgentTaskDAO(db)
 
         llm = build_llm_for_user(db, task.user_id)

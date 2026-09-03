@@ -735,3 +735,9 @@ function sourceLabel(sourceType) {
 }
 
 loadCategories();
+
+// 通知深链接：?tab=mine → 直接进「我的知识」（爬取面板会自动恢复）
+if (new URLSearchParams(location.search).get('tab') === 'mine') {
+  switchTab('mine');
+  history.replaceState(null, '', location.pathname);
+}

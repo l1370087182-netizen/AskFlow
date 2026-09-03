@@ -352,3 +352,12 @@ input.addEventListener('keydown', (e) => {
 });
 
 loadRecords();
+
+// 通知深链接：?record=<id> → 打开对应面试记录（不存在时 openRecord 内提示）
+(function () {
+  const rid = new URLSearchParams(location.search).get('record');
+  if (rid && /^\d+$/.test(rid)) {
+    openRecord(parseInt(rid, 10));
+    history.replaceState(null, '', location.pathname);
+  }
+})();

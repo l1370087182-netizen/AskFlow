@@ -135,8 +135,8 @@ def save_evaluation(
     topic: str,
     rounds: int,
     evaluation_text: str,
-) -> int:
-    """解析评分文本并写入 evaluate 表，返回记录 id"""
+):
+    """解析评分文本并写入 evaluate 表，返回记录行（通知挂钩取分数用）"""
     structured = extract_structured(evaluation_text)
     dao = EvaluateDAO(db)
     row = dao.create(
@@ -151,4 +151,4 @@ def save_evaluation(
         missed_points=json.dumps(structured.get("missed", []), ensure_ascii=False),
         raw=evaluation_text,
     )
-    return row.id
+    return row

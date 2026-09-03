@@ -42,6 +42,7 @@ class ReviewerAgent(BaseAgent):
 
     def process(self, task, db) -> None:
         knowledge_ids = (task.payload or {}).get("knowledge_ids", [])
+        self._note(f"质检 {len(knowledge_ids)} 条知识")
         dao = AgentTaskDAO(db)
         kb_dao = KnowledgeDAO(db)
         llm = build_llm_for_user(db, task.user_id)  # 可为 None → 纯规则

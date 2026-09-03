@@ -5,10 +5,15 @@
 子类只需声明 KINDS 并实现 process(task, db)。
 
 没有中央调度器：谁干什么由「kind 归属 + 先来先出 + 认领竞争」涌现。
+
+活动状态（任务板可视化）：`self.activity` 供 manager.agent_statuses 读取。
+铁律：永远整体替换（`self.activity = {...}` 或 `{**self.activity, ...}`），
+禁止原地改字段——CPython 下引用替换是原子的，读线程不会读到撕裂状态。
 """
 import logging
 import random
 import threading
+import time
 
 from DAO.agent_task_dao import AgentTaskDAO
 from database.session import SessionLocal
@@ -19,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRY = 3               # 重试上限：耗尽转 failed，不挂死
 CLAIM_LOCK = ClaimLock()    # 全 Agent 共享的认领锁实例
+
+_IDLE = lambda: {"status": "idle", "task_id": "", "kind": "", "desc": "", "since": time.time()}  # noqa: E731
 
 
 class TaskPermanentError(Exception):
@@ -35,9 +42,22 @@ class BaseAgent(threading.Thread):
         super().__init__(daemon=True, name=agent_id)
         self.agent_id = agent_id
         self._stopped = threading.Event()
+        # 活动快照（展示用，弱一致可接受；读写规则见模块 docstring）
+        self.activity = _IDLE()
 
     def stop(self) -> None:
         self._stopped.set()
+
+    def _note(self, desc: str) -> None:
+        """更新当前阶段描述（子类在 process 内调用；整体替换保证原子可见）"""
+        self.activity = {**self.activity, "desc": desc}
+
+    @staticmethod
+    def _activity_desc(task: AgentTaskModel) -> str:
+        """认领时的初始描述：kind + payload 里的主题/目标/URL 摘要"""
+        p = task.payload or {}
+        subject = str(p.get("topic") or p.get("goal") or p.get("url") or "").strip()[:30]
+        return f"处理 {task.kind} 任务" + (f"：{subject}" if subject else "")
 
     # ---------- 主循环 ----------
 
@@ -83,6 +103,13 @@ class BaseAgent(threading.Thread):
             claimed = dao.claim_cas(task.id, self.agent_id, task.version)
             if claimed is None:
                 return  # CAS 冲突/已被抢走，立即放弃
+            self.activity = {
+                "status": "working",
+                "task_id": claimed.id,
+                "kind": claimed.kind,
+                "desc": self._activity_desc(claimed),
+                "since": time.time(),
+            }
             try:
                 self.process(claimed, db)
             except TaskPermanentError as e:
@@ -93,6 +120,7 @@ class BaseAgent(threading.Thread):
                 self._handle_transient_failure(dao, claimed, e)
         finally:
             CLAIM_LOCK.release(task.id, self.agent_id)
+            self.activity = _IDLE()
 
     def _handle_transient_failure(
         self, dao: AgentTaskDAO, task: AgentTaskModel, err: Exception
