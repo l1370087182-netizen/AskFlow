@@ -233,9 +233,14 @@ class PlannerAgent(BaseAgent):
         if llm is None:
             raise TaskPermanentError("未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型")
 
-        # 引用资料：拆解时带上的优先；为空时现检索一次（自动爬取刚完成
-        # 的新资料此刻才检索得到——命中即带着编材料）
+        # 引用资料优先级：
+        # ① 拆解时带上的 refs；
+        # ② 补爬链路刚入库的知识（直接取，最可靠——避免「刚爬完的资料重新检索
+        #    不到 / 被相关度阈值过滤」导致材料误判为无资料）；
+        # ③ 现检索一次兜底。
         refs = list(p.get("refs") or [])
+        if not refs:
+            refs = self._refs_from_crawl_chain(dao, p.get("crawl_task_id", ""))
         if not refs:
             refs = self._search_refs(db, task.user_id, topic)
 
@@ -328,6 +333,28 @@ class PlannerAgent(BaseAgent):
         except Exception as e:  # noqa: BLE001 —— 检索失败则材料不带引用
             logger.warning("[planner] 主题「%s」检索失败（材料不带引用）：%s", topic, e)
             return []
+
+    def _refs_from_crawl_chain(self, dao: AgentTaskDAO, cid: str) -> list[dict]:
+        """直接取补爬链路入库的知识 id（web_search → 子 crawl 的 output.knowledge_ids）。
+
+        材料生成必然用到刚爬到的内容，不依赖「重新检索能否召回/过阈值」。
+        链路不全 / 未完成 / 无入库条目时返回 []（调用方退回检索兜底）。
+        """
+        if not cid:
+            return []
+        ref = dao.get(cid)
+        if ref is None:
+            return []
+        crawl = ref
+        if ref.kind == TaskKind.WEB_SEARCH:
+            child = dao.find_child(ref.id, TaskKind.CRAWL)
+            if child is None:
+                return []
+            crawl = child
+        if crawl.kind != TaskKind.CRAWL:
+            return []
+        kids = (crawl.output or {}).get("knowledge_ids") or []
+        return [{"knowledge_id": k} for k in kids if k]
 
     # ---------- 知识引用 ----------
 

@@ -154,10 +154,17 @@ class ProducerAgent(BaseAgent):
         _try_save(r, state)
 
         # 5) 写回任务引擎（幂等 CAS；被取消/回收过的任务此处自动放弃）
+        # 入库条目 id 一并写进 output：学习材料生成时直接取用（比重新检索更可靠，
+        # 避免「刚爬完的资料因检索阈值/召回不到而被当成无资料」）
+        knowledge_ids = [
+            p["knowledge_id"] for p in state["pages"]
+            if p.get("ok") and p.get("knowledge_id")
+        ]
         output = {
             "done_pages": state["done_pages"],
             "failed_pages": state["failed_pages"],
             "skipped_pages": state["skipped_pages"],
+            "knowledge_ids": knowledge_ids,
         }
         summary = (
             f"成功 {state['done_pages']} / 失败 {state['failed_pages']}"
@@ -186,10 +193,6 @@ class ProducerAgent(BaseAgent):
             return
         # 接力：写回成功且有入库条目 → 发质检子任务（审核与生产分离）
         if state["status"] != "failed":
-            knowledge_ids = [
-                p["knowledge_id"] for p in state["pages"]
-                if p.get("ok") and p.get("knowledge_id")
-            ]
             if knowledge_ids:
                 dao.create(
                     kind=TaskKind.QUALITY_REVIEW,
