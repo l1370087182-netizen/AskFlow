@@ -429,6 +429,7 @@ class PlannerAgent(BaseAgent):
             return "未能生成结构化计划（模型输出不可解析），请直接参考总评薄弱点自学。"
         prio_zh = {"high": "高", "medium": "中", "low": "低"}
         lines = [f"## 学习计划 · {jd_title or '面试补强'}", ""]
+        missing = []   # 知识库暂无资料的主题，末尾统一说明，避免逐条刷屏
         for i, it in enumerate(items, 1):
             lines.append(f"### {i}. {it['topic']}（优先级：{prio_zh.get(it['priority'], '中')}）")
             if it.get("reason"):
@@ -438,8 +439,13 @@ class PlannerAgent(BaseAgent):
             topic_refs = refs.get(it["topic"]) or []
             if topic_refs:
                 titles = "、".join(f"《{r['title']}》" for r in topic_refs)
-                lines.append(f"- **知识库已有**：{titles}")
+                lines.append(f"- **知识库资料**：{titles}")
             else:
-                lines.append("- **知识库暂无**：可提交爬取补充，或自行查找官方文档")
+                missing.append(it["topic"])
             lines.append("")
+        if missing:
+            lines.append(
+                f"> 知识库暂无「{'、'.join(missing)}」相关资料。"
+                "把计划发上任务板后，系统会自动联网检索并爬取补充，无需手动操作。"
+            )
         return "\n".join(lines)
