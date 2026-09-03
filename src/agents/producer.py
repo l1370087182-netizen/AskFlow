@@ -14,6 +14,7 @@ import redis
 
 from DAO.agent_task_dao import AgentTaskDAO
 from agent_engine.base_agent import BaseAgent, TaskPermanentError
+from agents.quality import rule_verdict
 from generation.llm import build_llm_for_user
 from model.AgentTaskModel import TaskKind, TaskStatus
 from model.KnowledgeModel import KnowledgeModel
@@ -113,6 +114,20 @@ class ProducerAgent(BaseAgent):
                 title = page.get("title") or page["url"]
                 self._note(f"AI 清洗入库中：{str(title)[:30]}")
                 cleaned_text, cleaned = clean_page_content(llm, title, page["content"])
+
+                # 质量门禁（规则层前置）：清洗后、入库前拦明显垃圾，不入库不向量化。
+                # 只拦规则确信的（拿不准的照常入库，交给 reviewer 严格评分）；
+                # 被拦页留痕到进度面板，便于发现误拦。
+                gate = rule_verdict(cleaned_text)
+                if gate is not None:
+                    state["skipped_pages"] += 1
+                    state["pages"].append({
+                        "url": page["url"], "ok": False, "cleaned": cleaned,
+                        "knowledge_id": None, "error": f"质量门禁：{gate[1]}",
+                    })
+                    _try_save(r, state)
+                    continue
+
                 row = KnowledgeDAO(db).upsert(
                     title=title,
                     content=cleaned_text,
@@ -141,11 +156,15 @@ class ProducerAgent(BaseAgent):
             _try_save(r, state)
             raise
 
-        # 4) 终态判定：全成=done；有成有败=partial；颗粒无收=failed
+        # 4) 终态判定：全成=done；有成有败=partial；
+        #    无失败但全被质量门禁拦截=done（宁缺毋滥属正常，不报 failed 吓用户）；
+        #    其余颗粒无收=failed
         if state["done_pages"] > 0 and state["failed_pages"] == 0:
             state["status"] = "done"
         elif state["done_pages"] > 0:
             state["status"] = "partial"
+        elif state["failed_pages"] == 0 and state["skipped_pages"] > 0:
+            state["status"] = "done"
         else:
             state["status"] = "failed"
             first_err = next((p["error"] for p in state["pages"] if p.get("error")), "")

@@ -1,5 +1,5 @@
 from database.session import Base
-from sqlalchemy import Index, Integer, String, Text, DateTime
+from sqlalchemy import Float, Index, Integer, String, Text, DateTime
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
@@ -73,6 +73,15 @@ class KnowledgeModel(Base):
     # 0=待向量化，1=已向量化，2=向量化失败
     status: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="处理状态"
+    )
+    # 质量门禁（仅爬取条目会被打分；手工/上传恒为 NULL = 未评/豁免）
+    # NULL 语义：未评分或待补审（含 LLM 评分失败放行）。调阈值无需重跑 LLM。
+    quality_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None,
+        comment="知识价值分 0-10（LLM 评）；NULL=未评/待补审",
+    )
+    quality_reason: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, default=None, comment="质量判定理由"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now, comment="创建时间"

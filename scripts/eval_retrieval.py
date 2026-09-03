@@ -3,13 +3,13 @@
 用法（项目根目录，需后端未占用且知识已向量化）：
     uv run python scripts/eval_retrieval.py [--sample N] [--quiet]
 
-评测集三部分组成：
+评测集组成：
   1. 采样评测集：从已向量化全局知识里随机抽 N 篇，用「标题」当 query，
      同 knowledge_id 的块判为相关 —— ground truth 由库内数据自动导出，无需人工标注；
   2. 概念查询集：手写泛化问法（如「什么是依赖注入」），按关键词判相关；
-     评测前先用 BM25 全语料预检关键词覆盖，库里根本没有的自动转负例口径；
-  3. 负例集：知识领域外的问题（做菜/体育…），验证 rerank 阈值
-     RELEVANCE_MIN_SCORE 判「知识库无资料」是否不误报。
+  3. 负例集：知识领域外的问题（做菜/体育…），验证 rerank 阈值判「无资料」不误报；
+  4. 泛化查询集（两组，逐条同义改写）：口语化问法与文档标题零词面重合，
+     测真实检索力 + 换问法的稳定性；
 
 度量口径：
   - 召回：BM25@20 / 向量@20 / 融合@30 各自能否捞到相关块（Recall）+ 最好名次
@@ -52,6 +52,40 @@ MANUAL_QUERIES: list[dict] = [
     {"q": "Python 异常处理 try except", "kw": ["try:", "except", "异常处理"]},
     {"q": "Pydantic BaseModel 数据校验", "kw": ["BaseModel", "pydantic"]},
     {"q": "虚拟环境怎么创建和激活", "kw": ["虚拟环境", "venv"]},
+]
+
+# ---------- 泛化查询：口语化改写，问法与文档标题/关键词几乎不重合 ----------
+# 这才是贴近真实用户的问法：BM25 没有表面词可匹配，主要考验向量路与融合的语义召回
+HARD_QUERIES: list[dict] = [
+    {"q": "URL 路径里那段值怎么传到处理函数里", "kw": ["路径参数"]},
+    {"q": "前端提交的账号密码在后端怎么接收", "kw": ["表单"]},
+    {"q": "多个接口共用的前置逻辑怎么只写一遍", "kw": ["依赖项", "Depends"]},
+    {"q": "浏览器同源策略报错怎么解决", "kw": ["CORS", "跨域"]},
+    {"q": "程序出错了怎么把现场信息记到文件里", "kw": ["logging", "日志"]},
+    {"q": "Python 里支持异步的 HTTP 客户端库", "kw": ["httpx"]},
+    {"q": "不启动真实服务怎么验证接口行为", "kw": ["TestClient"]},
+    {"q": "服务器怎么把不断产生的数据实时推给网页", "kw": ["SSE", "服务器发送事件"]},
+    {"q": "怎么让大模型去调外部提供的工具", "kw": ["Function Calling", "函数调用"]},
+    {"q": "怎么量化一套检索问答系统做得好不好", "kw": ["评估"]},
+    {"q": "接口入参的类型检查和自动报错用什么实现", "kw": ["pydantic", "校验"]},
+    {"q": "一段话怎么变成能比较远近的数字表示", "kw": ["Embedding", "向量化"]},
+]
+
+# ---------- 泛化查询·第二组：与 HARD_QUERIES 逐条同义改写（一一对应） ----------
+# 用途：① 扩充改写问法样本 ② 测换问法的稳定性——同一意图两种说法是否都能命中
+HARD2_QUERIES: list[dict] = [
+    {"q": "接口地址里的参数怎么在代码里拿到", "kw": ["路径参数"]},
+    {"q": "用户填的登录信息后端用什么方式读", "kw": ["表单"]},
+    {"q": "所有路由都要执行的公共检查写在哪里", "kw": ["依赖项", "Depends"]},
+    {"q": "前端页面请求别的域名接口被拒怎么办", "kw": ["CORS", "跨域"]},
+    {"q": "程序跑着跑着崩了怎么留痕排查", "kw": ["logging", "日志"]},
+    {"q": "能发异步网络请求的 Python 包", "kw": ["httpx"]},
+    {"q": "不部署上线怎么试接口写得对不对", "kw": ["TestClient"]},
+    {"q": "后端有新消息怎么主动推给前端页面", "kw": ["SSE", "服务器发送事件"]},
+    {"q": "大模型怎么自己决定去执行一个 API", "kw": ["Function Calling", "函数调用"]},
+    {"q": "用什么指标衡量问答系统的回答质量", "kw": ["评估"]},
+    {"q": "请求参数不合法时自动返回错误用什么库", "kw": ["pydantic", "校验"]},
+    {"q": "两句话语义接不接近怎么让机器算", "kw": ["Embedding", "向量化"]},
 ]
 
 # ---------- 负例：知识库领域外，期望 rerank 分全部低于阈值 ----------
@@ -138,13 +172,44 @@ def run_query(query: str, rel, bm25, vector, reranker, fuse_top: int = 30):
     return rec
 
 
+# ---------- 关键词判相关的查询组（概念查询 / 泛化查询共用） ----------
+
+def run_labeled_group(label, items, group, records, bm25, vector, reranker, quiet):
+    print(f"\n═══ {label}（{len(items)} 条，关键词判相关）═══")
+    for mq in items:
+        coverage = sum(
+            1 for d in bm25.docs if any(k.lower() in d["content"].lower() for k in mq["kw"])
+        )
+        rel = (lambda h, kws=mq["kw"]: any(k.lower() in h["content"].lower() for k in kws))
+        rec = run_query(mq["q"], rel, bm25, vector, reranker)
+        rec["group"] = group
+        rec["coverage"] = coverage
+        records.append(rec)
+        if not quiet:
+            tag = f"语料覆盖 {coverage} 块" if coverage else "!! 语料无覆盖(按负例看)"
+            print(
+                f"  {mq['q']:<30} {tag:<20} bm25@{rec['bm25_rank'] or '-':>3} "
+                f"vec@{rec['vec_rank'] or '-':>3} fuse@{rec['fuse_rank'] or '-':>3} "
+                f"rerank@{(first_rank_from_rec(rec) or '-'):>2}"
+            )
+
+
 # ---------- 主流程 ----------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="双路召回 + Rerank 评测")
     ap.add_argument("--sample", type=int, default=15, help="采样评测集大小（默认 15）")
     ap.add_argument("--quiet", action="store_true", help="不打印逐 query 明细")
+    ap.add_argument(
+        "--only",
+        default="",
+        help="只跑指定组（逗号分隔）：sample,manual,negative,hard,hard2；默认全跑",
+    )
     args = ap.parse_args()
+    only = set(filter(None, args.only.split(",")))
+
+    def want(group: str) -> bool:
+        return not only or group in only
 
     db = SessionLocal()
     print("初始化 BM25 语料（首次可能重建缓存）…")
@@ -169,55 +234,59 @@ def main() -> None:
     )
     candidates = [(i, t) for i, t in rows if 4 <= len(t.strip()) <= 60 and t.strip() != "test"]
     random.Random(42).shuffle(candidates)
-    sampled = candidates[: args.sample]
-    print(f"═══ ① 采样评测（{len(sampled)} 篇，标题=query，同文档块=相关）═══")
-    for kid, title in sampled:
-        rec = run_query(title, lambda h, k=kid: h["knowledge_id"] == k, bm25, vector, reranker)
-        rec["group"], rec["title"] = "sample", title
-        records.append(rec)
-        if not args.quiet:
-            print(
-                f"  [{kid}] {title[:34]:<36} bm25@{rec['bm25_rank'] or '-':>3} "
-                f"vec@{rec['vec_rank'] or '-':>3} fuse@{rec['fuse_rank'] or '-':>3} "
-                f"rerank@{(first_rank_from_rec(rec) or '-'):>2} {rec['elapsed_ms']:.0f}ms"
-            )
+    sampled = candidates[: args.sample] if want("sample") else []
+    if sampled:
+        print(f"═══ ① 采样评测（{len(sampled)} 篇，标题=query，同文档块=相关）═══")
+        for kid, title in sampled:
+            rec = run_query(title, lambda h, k=kid: h["knowledge_id"] == k, bm25, vector, reranker)
+            rec["group"], rec["title"] = "sample", title
+            records.append(rec)
+            if not args.quiet:
+                print(
+                    f"  [{kid}] {title[:34]:<36} bm25@{rec['bm25_rank'] or '-':>3} "
+                    f"vec@{rec['vec_rank'] or '-':>3} fuse@{rec['fuse_rank'] or '-':>3} "
+                    f"rerank@{(first_rank_from_rec(rec) or '-'):>2} {rec['elapsed_ms']:.0f}ms"
+                )
 
-    # ② 概念查询：先预检语料里有没有关键词，没有的按负例口径标注
-    print(f"\n═══ ② 概念查询（{len(MANUAL_QUERIES)} 条，关键词判相关）═══")
-    for mq in MANUAL_QUERIES:
-        coverage = sum(
-            1 for d in bm25.docs if any(k.lower() in d["content"].lower() for k in mq["kw"])
+    # ② 概念查询：问法与文档有表面词重合（偏易）；先预检语料里有没有关键词
+    if want("manual"):
+        run_labeled_group(
+            "② 概念查询", MANUAL_QUERIES, "manual", records, bm25, vector, reranker, args.quiet
         )
-        rel = (lambda h, kws=mq["kw"]: any(k.lower() in h["content"].lower() for k in kws))
-        rec = run_query(mq["q"], rel, bm25, vector, reranker)
-        rec["group"] = "manual"
-        rec["coverage"] = coverage
-        records.append(rec)
-        if not args.quiet:
-            tag = f"语料覆盖 {coverage} 块" if coverage else "!! 语料无覆盖(按负例看)"
-            print(
-                f"  {mq['q']:<28} {tag:<22} bm25@{rec['bm25_rank'] or '-':>3} "
-                f"vec@{rec['vec_rank'] or '-':>3} fuse@{rec['fuse_rank'] or '-':>3} "
-                f"rerank@{(first_rank_from_rec(rec) or '-'):>2}"
-            )
 
     # ③ 负例：期望最高 rerank 分 < 阈值（判「无资料」正确）
-    print(f"\n═══ ③ 负例（{len(NEGATIVE_QUERIES)} 条，期望判「无资料」）═══")
-    for q in NEGATIVE_QUERIES:
-        rec = run_query(q, lambda h: False, bm25, vector, reranker)
-        rec["group"] = "negative"
-        records.append(rec)
-        top_score = max((s for s, _ in rec["rerank_scores"]), default=0.0)
-        verdict = "✅ 正确判无资料" if top_score < RELEVANCE_MIN_SCORE else "❌ 误判有资料"
-        if not args.quiet:
-            print(f"  {q:<24} 最高 rerank 分 {top_score:.3f} → {verdict}")
+    if want("negative"):
+        print(f"\n═══ ③ 负例（{len(NEGATIVE_QUERIES)} 条，期望判「无资料」）═══")
+        for q in NEGATIVE_QUERIES:
+            rec = run_query(q, lambda h: False, bm25, vector, reranker)
+            rec["group"] = "negative"
+            records.append(rec)
+            top_score = max((s for s, _ in rec["rerank_scores"]), default=0.0)
+            verdict = "✅ 正确判无资料" if top_score < RELEVANCE_MIN_SCORE else "❌ 误判有资料"
+            if not args.quiet:
+                print(f"  {q:<24} 最高 rerank 分 {top_score:.3f} → {verdict}")
+
+    # ④ 泛化查询：口语化改写，与文档几乎无表面词重合（真实用户问法）
+    if want("hard"):
+        run_labeled_group(
+            "④ 泛化查询（改写问法）", HARD_QUERIES, "hard", records, bm25, vector, reranker, args.quiet
+        )
+
+    # ⑤ 泛化查询第二组：与④逐条同义改写，测换问法的稳定性
+    if want("hard2"):
+        run_labeled_group(
+            "⑤ 泛化查询·第二组（同义改写）", HARD2_QUERIES, "hard2", records,
+            bm25, vector, reranker, args.quiet,
+        )
 
     db.close()
 
     # ---------- 汇总 ----------
     samples = [r for r in records if r["group"] == "sample"]
     manuals = [r for r in records if r["group"] == "manual" and r.get("coverage", 0) > 0]
-    positives = samples + manuals          # 有标准答案的正例
+    hards = [r for r in records if r["group"] == "hard" and r.get("coverage", 0) > 0]
+    hards2 = [r for r in records if r["group"] == "hard2" and r.get("coverage", 0) > 0]
+    positives = samples + manuals + hards + hards2   # 有标准答案的正例
     negatives = [r for r in records if r["group"] == "negative"]
 
     print("\n" + "═" * 74)
@@ -228,9 +297,24 @@ def main() -> None:
         print("没有可用正例，退出")
         return
 
-    print(f"\n【双路召回率】正例 {n} 条，各阶段能否捞到相关块：")
-    print(f"  BM25@20      召回 {pct(sum(r['bm25_hit20'] for r in positives), n)}")
-    print(f"  向量@20      召回 {pct(sum(r['vec_hit20'] for r in positives), n)}")
+    print(f"\n【双路召回率】分组看各阶段能否捞到相关块：")
+    print(f"  {'组别':<16}{'BM25@20':>14}{'向量@20':>14}{'融合@30':>14}")
+    for name, grp in [
+        ("采样·标题原题", samples),
+        ("概念·词面重合", manuals),
+        ("泛化·改写一", hards),
+        ("泛化·改写二", hards2),
+        ("合计", positives),
+    ]:
+        if not grp:
+            continue
+        g = len(grp)
+        print(
+            f"  {name:<16}"
+            f"{pct(sum(r['bm25_hit20'] for r in grp), g):>14}"
+            f"{pct(sum(r['vec_hit20'] for r in grp), g):>14}"
+            f"{pct(sum(1 for r in grp if r['fuse_rank']), g):>14}"
+        )
     both = sum(1 for r in positives if r["bm25_hit20"] and r["vec_hit20"])
     only_b = sum(1 for r in positives if r["bm25_hit20"] and not r["vec_hit20"])
     only_v = sum(1 for r in positives if r["vec_hit20"] and not r["bm25_hit20"])
@@ -243,6 +327,18 @@ def main() -> None:
         and (r["bm25_hit20"] or r["vec_hit20"])
     )
     print(f"  RRF 融合@30  召回 {pct(fused_n, n)}（单路命中但名次靠后、被融合捞回的 {rescued} 条）")
+
+    # ④⑤ 逐条同义：同一意图两种问法是否都命中（检索稳定性）
+    if hards and hards2 and len(hards) == len(hards2):
+        pairs = list(zip(hards, hards2))
+        both_ok = sum(1 for a, b in pairs if a["fuse_rank"] and b["fuse_rank"])
+        unstable = [
+            (a["query"], b["query"]) for a, b in pairs if bool(a["fuse_rank"]) != bool(b["fuse_rank"])
+        ]
+        print(f"\n【换问法稳定性】④/⑤ 同义问法两两对照 {len(pairs)} 对：")
+        print(f"  两种问法都命中（融合@30）：{both_ok}/{len(pairs)}")
+        for q1, q2 in unstable:
+            print(f"  ⚠️ 同题不同命：「{q1}」 vs 「{q2}」")
 
     print("\n【精排效果】融合后 top5 对比（RRF 原序 vs Rerank 后）：")
     print(f"  {'指标':<12}{'RRF@5':>12}{'Rerank@5':>12}")

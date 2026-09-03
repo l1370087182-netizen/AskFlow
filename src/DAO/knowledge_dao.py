@@ -214,6 +214,18 @@ class KnowledgeDAO:
         self.db.commit()
         return True
 
+    def update_quality(
+        self, knowledge_id: int, score: float | None, reason: str | None
+    ) -> bool:
+        """写入质量分/理由（质量门禁用；score=None 表示未评/待补审）"""
+        row = self.get_by_db(knowledge_id)
+        if not row:
+            return False
+        row.quality_score = score
+        row.quality_reason = (reason or "")[:255] or None
+        self.db.commit()
+        return True
+
     def delete(self, knowledge_id: int) -> bool:
         """删除知识"""
         row = self.get_by_db(knowledge_id)

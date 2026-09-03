@@ -172,6 +172,17 @@ def main() -> None:
         )
         ensure_term_user_unique(conn)
 
+    # 质量门禁迁移（幂等）：knowledge 补质量分/理由两列（存量行 NULL=未评/豁免）
+    with engine.connect() as conn:
+        ensure_column(
+            conn, "knowledge", "quality_score",
+            "quality_score FLOAT NULL COMMENT '知识价值分0-10（LLM评）；NULL=未评/待补审'",
+        )
+        ensure_column(
+            conn, "knowledge", "quality_reason",
+            "quality_reason VARCHAR(255) NULL COMMENT '质量判定理由'",
+        )
+
     # 抽查：表是否都存在
     with engine.connect() as conn:
         for table in ("knowledge", "tech_term", "jd", "tech_stack", "evaluate", "user", "agent_task", "interview_record", "notification"):

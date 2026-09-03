@@ -195,6 +195,8 @@ project/
 | category | varchar(128) | 技术分类：fastapi / python / pydantic / ai… |
 | source_type | varchar(32) | 来源类型：spider / upload |
 | status | int | 0=待向量化，1=已向量化，2=失败 |
+| quality_score | float NULL | 质量门禁知识价值分 0-10（LLM 评）；NULL=未评/待补审，手工/上传恒豁免 |
+| quality_reason | varchar(255) NULL | 质量判定理由 |
 | created_at / updated_at | datetime | 时间戳 |
 
 ### 5.2 后续建的表（✅ 均已建）
@@ -226,6 +228,7 @@ project/
 | 11 | 用户鉴权 + 数据隔离 | ✅ 完成 | 邮箱验证码注册/登录/忘记密码；对话/评估/面试/模型配置按用户隔离；仅新增 PyJWT 依赖 |
 | 12 | 相关度阈值 + 联网搜索补爬 + 任务治理 | ✅ 完成 | 阈值判「无资料」；博查联网补爬（SearcherAgent，异步）；取消真正生效（CAS+探针+级联）；任务板进度条 |
 | 13 | 任务板体验 + 通知中心 + Agent 可视化 | ✅ 完成 | 任务板分页/抽屉/删除目标（级联）+ 排序修复（created_at）；站内通知（铃铛/红点/批量已读删除/深链跳转）；Agent 活动面板 + work_log 查看器 |
+| 14 | 入库质量门禁 | ✅ 完成 | 宁缺毋滥：规则+LLM 双门禁（≥6 分才留）、quality_score 落库、LLM 失败不误删、存量补审脚本 |
 
 ### 爬虫模块已完成部分清点
 
@@ -369,6 +372,17 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - **取消真正生效**（配套修复）：`cancel_task` CAS 化；`producer`/`searcher` 逐页/逐阶段用 `dao.heartbeat` 返回值做取消探针（False→读 DB 定性后终止，不 write_back、不派生孤儿任务）；任务板取消会级联取消子题引用的爬取/检索链（`_cancel_crawl_chain`）。
 - **降级**：未配 `SEARCH_API_KEY` / 无用户模型 / 活跃检索达上限 → 静默跳过补爬，主流程照常。
 - 任务板进度：`GET /api/board/` 每个子题附 `crawl_progress`（页数百分比 + 当前 URL），前端用不定长动画条表示检索阶段、确定进度条表示爬取阶段。
+
+### 7.8 入库质量门禁（宁缺毋滥，新增）
+
+爬取内容入库前/后两道把关，确保「库小但每条都是干货」：
+- **共享判定 `agents/quality.py`**：`rule_verdict`（规则层，只拦无争议垃圾：过短 / 短正文+多导航词 / 乱码，拿不准返回 None）；`score_content`（LLM 给知识价值打 0-10 分，含重试）；`QUALITY_MIN_SCORE=6.0`（严格度旋钮，调高前先跑存量采样）。
+- **producer 前置过滤**（仅规则、不调 LLM，尊重「质检归 reviewer」）：清洗后、upsert 前 `rule_verdict` 拦明显垃圾——不入库不向量化，被拦页留痕到进度面板。终态修正：整站全被门禁拦截 → 判 `done` 不判 `failed`（属正常，不吓用户）。
+- **reviewer 严格质检**（核心，翻转为严格）：规则先筛 → 拿不准调 `score_content` → **≥ QUALITY_MIN_SCORE 才 keep，否则删行删向量**；keep 行写 `quality_score`。
+- **LLM 失败绝不误删**：评分失败 → keep + 分数记 NULL（"待补审"）+ 留痕 `llm_failed`（删除不可逆，裁判罢工时宁混入垃圾不误删干货）。
+- **落库字段** `knowledge.quality_score / quality_reason`（可空，init_db 幂等补列）：`NULL` = 未评/待补审（手工/上传恒豁免）。调阈值无需重跑 LLM。
+- **范围**：门禁只管**爬取**内容；手工添加/上传豁免（用户对自己的内容负责）。
+- **存量清理** `scripts/review_personal_kb.py --user <id>`：默认 `--dry-run` 采样评分供校准，`--apply` 分片（≤50）建补审质检任务；只碰 `user_id>0` 且排除 `manual://`；`--max-rows` 熔断。
 
 ---
 

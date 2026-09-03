@@ -97,6 +97,12 @@ def _done_text(kind: str, task_id: str, parent_id: str, payload: dict, output: d
         skipped = int(output.get("skipped_pages") or 0)
         topic = str(payload.get("topic", "")).strip()[:40]
         prefix = f"「{topic}」" if topic else ""
+        if done == 0 and failed == 0 and skipped > 0:
+            return (
+                "爬取完成",
+                f"{prefix}爬到 {skipped} 页，全部被质量门禁拦截，无干货入库（宁缺毋滥，属正常）",
+                "kb.html?tab=mine",
+            )
         if failed > 0:
             return (
                 "爬取部分完成",
