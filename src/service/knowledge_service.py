@@ -28,7 +28,6 @@ import redis
 from bs4 import BeautifulSoup
 
 from DAO.agent_task_dao import AgentTaskDAO
-from database.session import SessionLocal
 from generation.llm import build_llm_for_user
 from generation.prompts import AI_ADD_SYSTEM_PROMPT, CLEAN_SYSTEM_PROMPT
 from milvus.ingestion.pipeline import IngestionPipeline
@@ -203,17 +202,15 @@ def _save_task(r: redis.Redis, state: dict) -> None:
     )
 
 
-def _is_alive(state: dict) -> bool:
-    """任务是否仍在有效推进：非终态且 heartbeat 未超时"""
-    if state["status"] not in ("pending", "running"):
-        return False
-    return time.time() - state.get("heartbeat", 0) <= HEARTBEAT_TIMEOUT_SEC
-
-
 def submit_crawl(
-    db, *, uid: int, url: str, category: str, max_pages: int
+    db, *, uid: int, url: str = "", urls: list[str] | None = None,
+    category: str, max_pages: int, topic: str = "", parent_id: str = "",
 ) -> str:
-    """提交整站浅爬任务：写入任务引擎（agent_task），由 ProducerAgent 并行消费。
+    """提交浅爬任务：写入任务引擎（agent_task），由 ProducerAgent 并行消费。
+
+    两种形态：
+    - 单种子 `url`：整站浅爬（BFS 同域扩链，≤max_pages 页）
+    - 显式列表 `urls`：联网检索选出的页面逐页直抓（不扩链，页数=列表长）
 
     :return: task_id（= agent_task.id）
     :raises CrawlSubmitError: 400（未配置模型/SSRF/URL 非法）或 409（活跃任务达上限）
@@ -225,11 +222,41 @@ def submit_crawl(
             "尚未配置个人大模型，请先到「对话学习」页 ⚙️ 模型配置中保存模型后再提交爬取",
         )
 
-    # 2) SSRF / 协议检查
-    try:
-        url = validate_public_url(url)
-    except ValueError as e:
-        raise CrawlSubmitError(400, f"URL 不可用：{e}") from e
+    # 2) 目标地址安全检查（逐条）+ 组装 payload
+    topic = (topic or "").strip()[:200]
+    if urls:
+        clean_urls: list[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            u = str(u or "").strip()
+            if not u or u in seen:
+                continue
+            try:
+                u = validate_public_url(u)
+            except ValueError as e:
+                logger.info("[kb-crawl] 丢弃非法页面（%s）：%s", e, u)
+                continue
+            seen.add(u)
+            clean_urls.append(u)
+        clean_urls = clean_urls[:10]  # 显式列表上限 10 页
+        if not clean_urls:
+            raise CrawlSubmitError(400, "没有可爬取的有效页面")
+        payload = {
+            "urls": clean_urls,
+            "category": category or "general",
+            "max_pages": len(clean_urls),
+            "topic": topic,
+        }
+        display_url = clean_urls[0]
+        final_pages = len(clean_urls)
+    else:
+        try:
+            url = validate_public_url(url)
+        except ValueError as e:
+            raise CrawlSubmitError(400, f"URL 不可用：{e}") from e
+        payload = {"url": url, "category": category or "general", "max_pages": max_pages}
+        display_url = url
+        final_pages = max_pages
 
     # 3) 活跃任务上限（DB 为真相源：pending+in_progress）
     dao = AgentTaskDAO(db)
@@ -242,16 +269,19 @@ def submit_crawl(
     task = dao.create(
         kind=TaskKind.CRAWL,
         user_id=uid,
-        payload={"url": url, "category": category or "general", "max_pages": max_pages},
+        payload=payload,
+        parent_id=parent_id,
     )
     try:
         _save_task(_redis(), {
             "task_id": task.id,
             "uid": uid,
-            "url": url,
+            "url": display_url,
             "category": category or "general",
-            "max_pages": max_pages,
+            "max_pages": final_pages,
             "status": "pending",
+            "topic": topic,
+            "phase": "",
             "done_pages": 0,
             "failed_pages": 0,
             "skipped_pages": 0,
@@ -261,55 +291,134 @@ def submit_crawl(
             "heartbeat": time.time(),
             "created_at": time.time(),
             "finished_at": 0.0,
+            "child_task_id": "",
         })
     except redis.RedisError as e:
         # 进度态丢失不影响任务执行（只会少面板展示），记日志继续
         logger.warning("[kb-crawl] 进度态写入失败（任务照常执行）：%s", e)
     logger.info(
-        "[kb-crawl] 任务已提交：uid=%s url=%s max_pages=%s task=%s",
-        uid, url, max_pages, task.id,
+        "[kb-crawl] 任务已提交：uid=%s pages=%s max_pages=%s task=%s parent=%s",
+        uid, display_url, final_pages, task.id, parent_id or "-",
     )
     return task.id
 
 
-def get_crawl_task(uid: int, task_id: str) -> dict | None:
-    """读取任务进度；不存在/非本人返回 None（控制器统一 404，隐藏存在性）。
+def _synth_state(row) -> dict:
+    """按 agent_task 行合成最小进度视图（Redis 进度态缺失时兜底）。
 
-    悬挂判定：非终态但 heartbeat 超 10 分钟 → 对外呈现 failed。
-    Redis 不可用时进度态本就不可见，同样按「查不到」降级（不抛 500）。
+    status 只给初始值，调用方按 DB 生命周期状态覆写——
+    DB 是唯一真相源，Redis 只服务实时展示。
     """
-    try:
-        raw = _redis().get(TASK_KEY.format(task_id=task_id))
-    except redis.RedisError as e:
-        logger.warning("[kb-crawl] 进度查询降级（Redis 不可用）：%s", e)
-        return None
-    if not raw:
-        return None
-    state = json.loads(raw)
-    if state.get("uid") != uid:
-        return None
-    if state["status"] in ("pending", "running") and not _is_alive(state):
-        state["status"] = "failed"
-        state["error"] = state.get("error") or "任务超时（工作线程心跳丢失），已标记失败"
+    p = row.payload or {}
+    is_search = row.kind == TaskKind.WEB_SEARCH
+    return {
+        "task_id": row.id,
+        "uid": row.user_id,
+        "url": p.get("url", "") or (p.get("urls") or [""])[0],
+        "category": p.get("category", "general"),
+        "max_pages": int(p.get("max_pages", 0) or 0),
+        "status": "searching" if is_search else "pending",
+        "phase": "联网搜索补充" if is_search else "",
+        "topic": p.get("topic", ""),
+        "done_pages": 0,
+        "failed_pages": 0,
+        "skipped_pages": 0,
+        "current_url": "",
+        "pages": [],
+        "error": "",
+        "heartbeat": time.time(),
+        "created_at": row.created_at.timestamp() if row.created_at else time.time(),
+        "finished_at": 0.0,
+        "child_task_id": "",
+    }
+
+
+_DB_TERMINAL = {
+    TaskStatus.COMPLETED: "done",
+    TaskStatus.FAILED: "failed",
+    TaskStatus.CANCELED: "canceled",
+}
+
+
+def _view_by_db(row, state: dict) -> dict:
+    """用 DB 生命周期状态校准进度视图（DB 优先，防执行端崩溃/取消后视图失真）：
+
+    ① DB canceled → canceled（合并 Redis 已有进度）；
+    ② DB 终态而视图非终态 → 以 DB 覆盖（防 searcher/producer 崩溃后前端永远
+       显示 running/searching）；
+    ③ DB 活跃 → 状态以 DB 为准（pending 就是排队；悬挂判定只对 in_progress 做，
+       pending 由 reaper 兜底，不误判失败）。
+    """
+    db_status = row.status
+    if db_status == TaskStatus.CANCELED:
+        state["status"] = "canceled"
+        if not state.get("finished_at"):
+            state["finished_at"] = time.time()
+        return state
+    if db_status in _DB_TERMINAL:
+        if state["status"] not in ("done", "partial", "failed", "canceled"):
+            state["status"] = _DB_TERMINAL[db_status]
+            if db_status == TaskStatus.FAILED and not state.get("error"):
+                state["error"] = (row.output or {}).get("error", "") or "任务执行失败"
+        return state
+    # DB 活跃：生命周期以 DB 为准
+    if db_status == TaskStatus.PENDING:
+        state["status"] = "pending"  # 排队（含回收待重跑）
+    else:
+        if state["status"] not in ("running", "searching"):
+            state["status"] = (
+                "searching" if row.kind == TaskKind.WEB_SEARCH else "running"
+            )
+        if time.time() - state.get("heartbeat", 0) > HEARTBEAT_TIMEOUT_SEC:
+            state["status"] = "failed"
+            state["error"] = state.get("error") or "任务超时（工作线程心跳丢失），已标记失败"
     return state
 
 
-def get_active_crawl_tasks(uid: int) -> list[dict]:
-    """用户当前全部进行中的爬取任务（进度面板恢复用）。
+def get_crawl_task(db, uid: int, task_id: str) -> dict | None:
+    """读取任务进度。不存在/非本人/非爬取类返回 None（控制器统一 404）。
 
-    生命周期以 agent_task 表为真相源（pending+in_progress），
-    进度视图取 Redis；排队中（pending）的任务始终算活跃——
-    即使进度态心跳陈旧（如超时回收后续跑前），也不误判失败。
+    归属以 DB 行为准；Redis 进度态允许丢失——丢了按 payload 合成最小视图，
+    不 404（防前端误删任务块）；Redis 不可用同样降级，不抛 500。
     """
-    db = SessionLocal()
+    dao = AgentTaskDAO(db)
+    row = dao.get(task_id)
+    if row is None or row.user_id != uid or row.kind not in (
+        TaskKind.CRAWL, TaskKind.WEB_SEARCH
+    ):
+        return None
+
+    state = None
     try:
-        rows = AgentTaskDAO(db).list_by_user(
-            uid,
-            kind=TaskKind.CRAWL,
-            statuses=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
+        raw = _redis().get(TASK_KEY.format(task_id=task_id))
+        if raw:
+            state = json.loads(raw)
+    except redis.RedisError as e:
+        logger.warning("[kb-crawl] 进度查询降级（Redis 不可用）：%s", e)
+    if state is None:
+        state = _synth_state(row)
+
+    child = dao.find_child(task_id, TaskKind.CRAWL)  # WEB_SEARCH → 子爬取反查
+    state["child_task_id"] = child.id if child else ""
+    return _view_by_db(row, state)
+
+
+def get_active_crawl_tasks(db, uid: int) -> list[dict]:
+    """用户当前全部进行中的爬取/联网检索任务（进度面板恢复用）。
+
+    生命周期以 agent_task 表为真相源（pending+in_progress，两种 kind），
+    进度视图取 Redis，缺失按 payload 合成；最终状态一律经 DB 校准。
+    """
+    dao = AgentTaskDAO(db)
+    rows = []
+    for kind in (TaskKind.CRAWL, TaskKind.WEB_SEARCH):
+        rows.extend(
+            dao.list_by_user(
+                uid, kind=kind,
+                statuses=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
+            )
         )
-    finally:
-        db.close()
+    rows.sort(key=lambda r: r.created_at, reverse=True)
 
     try:
         r = _redis()
@@ -327,31 +436,10 @@ def get_active_crawl_tasks(uid: int) -> list[dict]:
             except Exception:  # noqa: BLE001
                 state = None
         if state is None:
-            # 进度态缺失（Redis 重启等）：按 payload 拼 pending 视图，不丢任务
-            p = row.payload or {}
-            state = {
-                "task_id": row.id,
-                "uid": uid,
-                "url": p.get("url", ""),
-                "category": p.get("category", "general"),
-                "max_pages": p.get("max_pages", 10),
-                "status": "pending",
-                "done_pages": 0,
-                "failed_pages": 0,
-                "skipped_pages": 0,
-                "current_url": "",
-                "pages": [],
-                "error": "",
-                "heartbeat": time.time(),
-                "created_at": time.time(),
-                "finished_at": 0.0,
-            }
-        if row.status == TaskStatus.PENDING:
-            state["status"] = "pending"  # 排队（含回收待重跑）以 DB 为准
-        elif state["status"] == "running" and not _is_alive(state):
-            state["status"] = "failed"
-            state["error"] = state.get("error") or "任务超时（心跳丢失），已标记失败"
-        out.append(state)
+            state = _synth_state(row)
+        child = dao.find_child(row.id, TaskKind.CRAWL)
+        state["child_task_id"] = child.id if child else ""
+        out.append(_view_by_db(row, state))
     return out
 
 

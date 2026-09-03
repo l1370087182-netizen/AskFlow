@@ -25,6 +25,28 @@ logger = logging.getLogger(__name__)
 # RRF 平滑常数，60 是原论文默认值
 RRF_K = 60
 
+# rerank 相关度阈值：混合检索永远返回 top-k（哪怕全不相关，也会返回
+# 「最不相关里最靠前」的块），不看分数会把无关块误判成「知识库有资料」，
+# 堵死缺资料自动补爬的触发条件——低于阈值一律视为未命中（知识库无资料）。
+# rerank 不可用时的降级分（rrf，量纲 0~0.03）不做阈值，避免降级期误杀。
+RELEVANCE_MIN_SCORE = 0.3
+
+
+def relevant_hits(hits: list[dict], min_score: float = RELEVANCE_MIN_SCORE) -> list[dict]:
+    """过滤 rerank 相关度过低的命中（无 knowledge_id 的也一并剔除）。
+
+    只过滤带 rerank_score 的结果；rerank 挂掉的降级结果（无 rerank_score）
+    原样保留——量纲不同不能套用同一阈值，宁可放行不误杀。
+    """
+    out = []
+    for h in hits:
+        if not h.get("knowledge_id"):
+            continue
+        if h.get("rerank_score") is not None and (h.get("score") or 0) < min_score:
+            continue
+        out.append(h)
+    return out
+
 
 def chunk_key(doc: dict) -> tuple:
     """块的跨检索器身份标识：(knowledge_id, 内容 md5)。

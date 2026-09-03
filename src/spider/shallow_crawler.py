@@ -32,6 +32,29 @@ class ShallowCrawler:
         self.max_pages = max_pages
         self.delay = delay
 
+    def iter_urls(self, urls: list[str]):
+        """显式 URL 列表逐页直抓（不扩链）：联网搜索补爬用。
+
+        搜索结果页来自不同站点，不存在「同域扩链」语义，逐页独立抓取，
+        产出与 iter_pages 同形状 {url, ok, title?, content?, links?, error?}，
+        任何单页失败不影响其余页面。
+        """
+        for raw in urls:
+            url = urlparse(raw)._replace(fragment="").geturl()
+            try:
+                data = crawl_one(url, self.delay)
+            except Exception as e:  # noqa: BLE001 —— 单页失败不抛给调用方
+                logger.warning("[shallow-crawl] 抓取失败 %s：%s", url, e)
+                yield {"url": url, "ok": False, "error": f"抓取失败：{e}"}
+                continue
+            yield {
+                "url": url,
+                "ok": True,
+                "title": data.get("title", ""),
+                "content": data.get("content", ""),
+                "links": [],  # 显式列表模式不扩链
+            }
+
     def iter_pages(self, seed_url: str):
         """BFS 逐页产出：{url, ok, title?, content?, links?, error?}
 

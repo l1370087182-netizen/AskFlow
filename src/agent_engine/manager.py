@@ -6,7 +6,8 @@
 3. Reviewer × 1（质检，审核与生产分离）
 4. Curator × 1（术语整理，接力懒消费）
 5. Planner × 1（学习规划，用户触发低频）
-6. TimeoutReaper（心跳超时回收 + 重试上限，唯一集中式兜底）
+6. Searcher × 1（联网搜索补爬：生成query→搜索→过滤→派生子爬取）
+7. TimeoutReaper（心跳超时回收 + 重试上限，唯一集中式兜底）
 
 注意：uvicorn --reload 会起多进程，勿在开发模式使用（重复消费）。
 """
@@ -19,6 +20,7 @@ from agents.curator import CuratorAgent
 from agents.planner import PlannerAgent
 from agents.producer import ProducerAgent
 from agents.reviewer import ReviewerAgent
+from agents.searcher import SearcherAgent
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,7 @@ def start_agent_engine() -> None:
             ReviewerAgent("reviewer-01"),
             CuratorAgent("curator-01"),
             PlannerAgent("planner-01"),
+            SearcherAgent("searcher-01"),
         ):
             agent.start()
             _agents.append(agent)
@@ -58,6 +61,6 @@ def start_agent_engine() -> None:
         _reaper.start()
 
         logger.info(
-            "[agent-engine] 已启动：producer×%s + reviewer + curator + planner + reaper",
+            "[agent-engine] 已启动：producer×%s + reviewer + curator + planner + searcher + reaper",
             PRODUCER_INSTANCES,
         )

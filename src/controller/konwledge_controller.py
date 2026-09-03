@@ -153,27 +153,59 @@ def my_crawl_submit(
 
 @router.get("/my/crawl/active", response_model=CrawlActiveOut)
 def my_crawl_active(
+    db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """当前全部进行中的爬取任务（前端进入「我的知识」时恢复进度面板）。
+    """当前全部进行中的爬取/联网检索任务（前端进入「我的知识」时恢复进度面板）。
 
     务必声明在 /my/crawl/{task_id} 之前，否则 "active" 被当成 task_id。
     并行化后单用户可多个任务；无活跃任务（含悬挂超时/已终态）返回空列表。
     """
-    states = kb_service.get_active_crawl_tasks(user.id)
+    states = kb_service.get_active_crawl_tasks(db, user.id)
     return CrawlActiveOut(tasks=[CrawlTaskOut(**s) for s in states])
 
 
 @router.get("/my/crawl/{task_id}", response_model=CrawlTaskOut)
 def my_crawl_progress(
     task_id: str,
+    db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """爬取任务进度。不存在/非本人/已过期统一 404"""
-    state = kb_service.get_crawl_task(user.id, task_id)
+    """爬取任务进度（DB 生命周期为准，Redis 提供实时明细）。
+    不存在/非本人/已过期统一 404"""
+    state = kb_service.get_crawl_task(db, user.id, task_id)
     if state is None:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     return CrawlTaskOut(**state)
+
+
+@router.post("/my/crawl/{task_id}/cancel")
+def my_crawl_cancel(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: UserModel = Depends(get_current_user),
+):
+    """取消本人的爬取/联网检索任务（含执行中——执行端每页心跳探针会尽快停下）。
+
+    WEB_SEARCH 顺带级联取消其子 crawl；已终态返回 canceled=false。
+    取消不回滚已入库数据（取消前爬到的页面保留）。
+    """
+    from DAO.agent_task_dao import AgentTaskDAO
+    from model.AgentTaskModel import TaskKind
+
+    dao = AgentTaskDAO(db)
+    task = dao.get(task_id)
+    if not task or task.user_id != user.id or task.kind not in (
+        TaskKind.CRAWL, TaskKind.WEB_SEARCH
+    ):
+        raise HTTPException(status_code=404, detail="未找到该任务")
+
+    canceled = dao.cancel_task(task_id) is not None
+    if canceled and task.kind == TaskKind.WEB_SEARCH:
+        child = dao.find_child(task_id, TaskKind.CRAWL)
+        if child is not None:
+            dao.cancel_task(child.id)  # 尽力级联；子任务已终态则无操作
+    return {"canceled": canceled, "task_id": task_id}
 
 
 @router.post("/my/ai-add", response_model=AIAddResponse)

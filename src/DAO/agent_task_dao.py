@@ -208,9 +208,15 @@ class AgentTaskDAO:
         self.db.refresh(row)
         return row
 
-    def heartbeat(self, task_id: str, agent_id: str) -> None:
-        """执行期心跳：只刷时间不动 version（写回 CAS 用的还是认领后的版本）"""
-        (
+    def heartbeat(self, task_id: str, agent_id: str) -> bool:
+        """执行期心跳：只刷时间不动 version（写回 CAS 用的还是认领后的版本）。
+
+        返回 False = 命中 0 行，任务已不在「in_progress + 本人认领」状态，
+        有三种可能：被用户取消 / 被 reaper 回收回 pending / 被 reaper 判败。
+        调用方应回读真实状态（get）定性并终止执行——它是执行侧唯一的
+        取消/中断探针（心跳兼作取消检查点）。
+        """
+        n = (
             self.db.query(AgentTaskModel)
             .filter(
                 AgentTaskModel.id == task_id,
@@ -220,6 +226,7 @@ class AgentTaskDAO:
             .update({AgentTaskModel.heartbeat_at: datetime.now()}, synchronize_session=False)
         )
         self.db.commit()
+        return n == 1
 
     # ---------- 退让 / 失败 / 超时回收 ----------
 
@@ -321,21 +328,63 @@ class AgentTaskDAO:
     def cancel_task(self, task_id: str, operator: str = "user") -> AgentTaskModel | None:
         """用户取消（任务板）：pending/in_progress → canceled。
 
-        不带 CAS 条件（用户操作以最新状态为准），但保留状态机白名单约束；
-        已终态的任务返回 None。
+        CAS 化（与认领同构）：原子 UPDATE 带状态条件，并发下不会把已终态
+        的任务覆盖成 canceled，也不会「读到 pending 取消、却被并发认领抢跑」；
+        成功后 version+1——先于取消认领的执行者迟到写回会被版本条件拒绝，
+        「取消没生效」换姿势复现的路一并堵死。已终态/不存在返回 None。
         """
-        row = self.get(task_id)
-        if row is None or row.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+        n = (
+            self.db.query(AgentTaskModel)
+            .filter(
+                AgentTaskModel.id == task_id,
+                AgentTaskModel.status.in_([TaskStatus.PENDING, TaskStatus.IN_PROGRESS]),
+            )
+            .update(
+                {
+                    AgentTaskModel.status: TaskStatus.CANCELED,
+                    AgentTaskModel.output: {"canceled": True},
+                    AgentTaskModel.version: AgentTaskModel.version + 1,
+                },
+                synchronize_session=False,
+            )
+        )
+        if n != 1:
+            self.db.rollback()
             return None
-        self._assert_transition(row.status, TaskStatus.CANCELED)
-        row.status = TaskStatus.CANCELED
-        row.output = {"canceled": True}
+        self.db.expire_all()
+        row = self.get(task_id)
         row.work_log = (row.work_log or []) + [_log_entry(operator, "cancel", "用户取消")]
         flag_modified(row, "work_log")
-        flag_modified(row, "output")
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    # ---------- 批量 / 关系查询 ----------
+
+    def list_by_ids(self, task_ids: list[str]) -> list[AgentTaskModel]:
+        """按 id 批量取任务（任务板批量进度用）"""
+        if not task_ids:
+            return []
+        return (
+            self.db.query(AgentTaskModel)
+            .filter(AgentTaskModel.id.in_(task_ids))
+            .all()
+        )
+
+    def find_child(self, parent_id: str, kind: str) -> AgentTaskModel | None:
+        """反查父任务下指定类型的子任务（如 WEB_SEARCH → 子 crawl；
+        取最早一条——子任务创建是单发语义，正常只有一条）"""
+        if not parent_id:
+            return None
+        return (
+            self.db.query(AgentTaskModel)
+            .filter(
+                AgentTaskModel.parent_id == parent_id,
+                AgentTaskModel.kind == kind,
+            )
+            .order_by(AgentTaskModel.created_at.asc())
+            .first()
+        )
 
     # ---------- 超时扫描 ----------
 

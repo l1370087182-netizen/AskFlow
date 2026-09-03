@@ -40,6 +40,7 @@ class TaskKind:
     """任务类型注册表：每种 kind 对应一个 Agent 角色"""
 
     CRAWL = "crawl"                    # 整站浅爬（producer，已接入）
+    WEB_SEARCH = "web_search"          # 联网搜索补爬（searcher：生成query→搜索→过滤→派生 crawl）
     QUALITY_REVIEW = "quality_review"  # 内容质检（reviewer）
     TERM_CURATE = "term_curate"        # 术语整理（curator）
     STUDY_PLAN = "study_plan"          # 面试记录 → 学习计划（planner）

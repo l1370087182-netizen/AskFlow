@@ -5,6 +5,7 @@
 - learning_item  单个学习子题，planner 基于知识库编学习材料
 越权读路一律 404（隐藏存在性），与其他模块约定一致。
 """
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,12 @@ from database.session import get_db
 from model.AgentTaskModel import AgentTaskModel, TaskKind, TaskStatus
 from model.InterviewRecordModel import InterviewRecordModel
 from model.UserModel import UserModel
+from service.knowledge_service import (
+    TASK_KEY,
+    _redis,
+    _synth_state,
+    _view_by_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +44,13 @@ class FromInterviewRequest(BaseModel):
     record_id: int = Field(..., description="面试记录 id")
 
 
-def _item_view(t: AgentTaskModel) -> dict:
+def _item_view(t: AgentTaskModel, crawl_progress: dict | None = None) -> dict:
     out = t.output or {}
     payload = t.payload or {}
+    # 爬取链路仍活跃（检索中/排队/爬取中）才算等待——结束后子题即恢复可认领
+    chain_active = bool(crawl_progress) and crawl_progress.get("status") in (
+        "pending", "running", "searching"
+    )
     return {
         "task_id": t.id,
         "topic": payload.get("topic", ""),
@@ -48,9 +59,68 @@ def _item_view(t: AgentTaskModel) -> dict:
         "suggestion": payload.get("suggestion", ""),
         "status": t.status,
         "has_material": bool(out.get("material_md")),
-        # 缺资料自动爬取：子题在等爬取任务终态（前端 pending 时显示「爬取资料中」）
-        "waiting_crawl": bool(payload.get("crawl_task_id")),
+        # 缺资料自动补爬：子题在等爬取链路（前端 pending 时显示进度条）
+        "waiting_crawl": chain_active,
+        "crawl_progress": crawl_progress if chain_active else None,
     }
+
+
+def _crawl_progress_map(db: Session, ref_ids: list[str]) -> dict:
+    """批量取子题引用的爬取/检索链路进度：{crawl_task_id: 进度视图}。
+
+    两次 DB IN 查询 + 一次 Redis MGET。WEB_SEARCH 已完成时下钻一层看子
+    crawl 的真实进度（子题真正等的是子任务跑完）；进度态缺失按 payload 合成。
+    """
+    if not ref_ids:
+        return {}
+    dao = AgentTaskDAO(db)
+    rows = {r.id: r for r in dao.list_by_ids(ref_ids)}
+
+    # WEB_SEARCH 已完成 → 跟到子 crawl（只跟一层）
+    follow: dict[str, str] = {}
+    for rid, row in rows.items():
+        if row.kind == TaskKind.WEB_SEARCH and row.status == TaskStatus.COMPLETED:
+            child = dao.find_child(rid, TaskKind.CRAWL)
+            if child is not None:
+                follow[rid] = child.id
+    if follow:
+        for r in dao.list_by_ids(list(follow.values())):
+            rows[r.id] = r
+
+    # Redis 进度一次 MGET（丢失的按 payload 合成，不影响状态判定）
+    eff_ids = list(dict.fromkeys(
+        follow.get(rid, rid) for rid in ref_ids if rid in rows
+    ))
+    states: dict[str, dict] = {}
+    try:
+        raws = _redis().mget([TASK_KEY.format(task_id=i) for i in eff_ids])
+        for i, raw in zip(eff_ids, raws):
+            if raw:
+                try:
+                    states[i] = json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
+    except Exception as e:  # noqa: BLE001 —— Redis 不可用降级：只剩 DB 状态视图
+        logger.warning("[board] 爬取进度批量查询降级（Redis 不可用）：%s", e)
+
+    out: dict[str, dict] = {}
+    for rid in ref_ids:
+        if rid not in rows:
+            continue  # 引用的任务行丢了（极端情况）：不展示进度条
+        eff = rows[follow.get(rid, rid)]
+        state = _view_by_db(eff, states.get(eff.id) or _synth_state(eff))
+        out[rid] = {
+            "kind": eff.kind,
+            "status": state["status"],
+            "done": state.get("done_pages", 0),
+            "failed": state.get("failed_pages", 0),
+            "skipped": state.get("skipped_pages", 0),
+            "max_pages": state.get("max_pages", 0),
+            "current_url": state.get("current_url", ""),
+            "phase": state.get("phase", ""),
+            "error": state.get("error", ""),
+        }
+    return out
 
 
 @router.post("/goals", status_code=202)
@@ -141,9 +211,17 @@ def list_board(
     for gid in children:
         children[gid].sort(key=lambda t: (t.payload or {}).get("order", 999))
 
+    # 批量取子题引用的爬取/检索链路进度（任务板进度条数据源）
+    ref_ids = sorted({
+        (t.payload or {}).get("crawl_task_id", "")
+        for ts in children.values()
+        for t in ts
+        if (t.payload or {}).get("crawl_task_id")
+    })
+    progress_map = _crawl_progress_map(db, ref_ids)
+
     out = []
     for g in goals:
-        items = [children.get(g.id, [])]
         item_rows = children.get(g.id, [])
         done = sum(1 for t in item_rows if t.status == TaskStatus.COMPLETED)
         out.append({
@@ -153,7 +231,13 @@ def list_board(
             "status": g.status,
             "created_at": g.created_at.isoformat() if g.created_at else None,
             "progress": {"done": done, "total": len(item_rows)},
-            "items": [_item_view(t) for t in item_rows],
+            "items": [
+                _item_view(
+                    t,
+                    progress_map.get((t.payload or {}).get("crawl_task_id", "")),
+                )
+                for t in item_rows
+            ],
         })
     return {"goals": out}
 
@@ -178,23 +262,48 @@ def task_detail(
     }
 
 
+def _cancel_crawl_chain(dao: AgentTaskDAO, ref_id: str) -> int:
+    """顺着子题引用级联取消底层爬取链，返回取消条数。
+
+    自动补爬任务不在目标子树（parent_id 不挂边），只在子题 payload 里留引用，
+    必须显式顺藤摸瓜：CRAWL → 取消本身；WEB_SEARCH → 取消本身 + 子 crawl。
+    """
+    if not ref_id:
+        return 0
+    task = dao.get(ref_id)
+    if task is None:
+        return 0
+    n = 1 if dao.cancel_task(ref_id) else 0
+    if task.kind == TaskKind.WEB_SEARCH:
+        child = dao.find_child(ref_id, TaskKind.CRAWL)
+        if child is not None and dao.cancel_task(child.id):
+            n += 1
+    return n
+
+
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(
     task_id: str,
     db: Session = Depends(get_db),
     user: UserModel = Depends(get_current_user),
 ):
-    """取消任务：目标是 learning_goal 时连带取消未完成的子题。"""
+    """取消任务：目标是 learning_goal 时连带取消未完成的子题，
+    并级联取消每个子题引用的底层爬取/联网检索任务。
+
+    已拆解完成（completed）的目标只要还有活跃子题也允许取消——
+    只取消子题与爬取链，goal 行保持 completed；
+    failed/canceled 或无任何可取消项才返回 400。
+    """
     dao = AgentTaskDAO(db)
     task = dao.get(task_id)
     if not task or task.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到该任务")
-    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED):
+    if task.status in (TaskStatus.FAILED, TaskStatus.CANCELED):
         raise HTTPException(status_code=400, detail="任务已结束，无需取消")
 
     canceled = 0
     if task.kind == TaskKind.LEARNING_GOAL:
-        # 连带取消未完成的子题
+        # 连带取消未完成子题 + 各子题引用的爬取链
         rows = (
             db.query(AgentTaskModel)
             .filter(
@@ -204,10 +313,24 @@ def cancel_task(
             .all()
         )
         for r in rows:
+            canceled += _cancel_crawl_chain(dao, (r.payload or {}).get("crawl_task_id", ""))
             if dao.cancel_task(r.id):
                 canceled += 1
-    if dao.cancel_task(task.id):
-        canceled += 1
+        # goal 本身仍活跃才取消；已拆解（completed）的只清子题不动 goal 行
+        if task.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+            if dao.cancel_task(task.id):
+                canceled += 1
+    else:
+        # learning_item / 爬取类任务：取消本身 + 顺引用级联
+        if task.kind == TaskKind.LEARNING_ITEM:
+            canceled += _cancel_crawl_chain(dao, (task.payload or {}).get("crawl_task_id", ""))
+        elif task.kind == TaskKind.WEB_SEARCH:
+            child = dao.find_child(task.id, TaskKind.CRAWL)
+            if child is not None and dao.cancel_task(child.id):
+                canceled += 1
+        if dao.cancel_task(task.id):
+            canceled += 1
+
     if canceled == 0:
         raise HTTPException(status_code=400, detail="任务已结束，无需取消")
     return {"canceled": canceled}

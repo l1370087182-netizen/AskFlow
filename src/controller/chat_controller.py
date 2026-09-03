@@ -85,6 +85,7 @@ def _chat_ask(
     session = load_session(uid, body.session_id, "ask")
 
     # 个人知识库：检索全局块 + 本人个人块；传入 llm 启用编排检索（可降级）
+    # build_ask 内已按相关度阈值过滤——空结果即「知识库无资料」
     messages, results = chain.build_ask(body.message, session["messages"], uid=uid, llm=llm)
 
     # 先把引用来源推给前端（片段对应的知识条目），再开始流式正文
@@ -102,6 +103,44 @@ def _chat_ask(
             ],
         }
     )
+
+    if not results:
+        # 知识库无资料：自动发起联网搜索补爬（异步，不阻塞本轮回答），
+        # 同时让模型用自身知识先简答（开头明确标注非知识库内容）
+        try:
+            from search.web_search import submit_web_search
+
+            search_task_id = submit_web_search(db, uid, body.message, source="chat")
+        except Exception:  # noqa: BLE001 —— 补爬提交失败不影响对话
+            search_task_id = None
+        if search_task_id:
+            yield _sse(
+                {
+                    "type": "kb_gap",
+                    "search_task_id": search_task_id,
+                    "message": "知识库暂无相关资料，已自动发起联网检索补充",
+                }
+            )
+            note = (
+                "【重要】知识库中没有与本次问题相关的资料，系统已自动发起联网检索补充。"
+                "请先基于你自身的知识给出简明回答，并在回答开头明确标注："
+                "「以下内容非知识库资料，仅供参考」。"
+            )
+        else:
+            yield _sse(
+                {
+                    "type": "kb_gap",
+                    "search_task_id": None,
+                    "message": "知识库暂无相关资料，将基于通用知识回答",
+                }
+            )
+            note = (
+                "【重要】知识库中没有与本次问题相关的资料。"
+                "请先基于你自身的知识给出简明回答，并在回答开头明确标注："
+                "「以下内容非知识库资料，仅供参考」。"
+            )
+        if messages:
+            messages[0]["content"] += "\n\n" + note
 
     out: list[str] = []
     yield from _stream_events(llm, messages, temperature=0.4, out=out)

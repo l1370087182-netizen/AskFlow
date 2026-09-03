@@ -16,7 +16,7 @@ from DAO.knowledge_dao import KnowledgeDAO
 from agent_engine.base_agent import BaseAgent, TaskPermanentError
 from generation.llm import build_llm_for_user
 from interview.prompts import PLANNER_PROMPT
-from milvus.retrieval.hybird import HybridRetriever
+from milvus.retrieval.hybird import RELEVANCE_MIN_SCORE, HybridRetriever, relevant_hits
 from model.AgentTaskModel import AgentTaskModel, TaskKind, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -24,23 +24,14 @@ logger = logging.getLogger(__name__)
 MAX_ITEMS = 6          # 目标拆解/计划条目上限
 REFS_PER_TOPIC = 2     # 每个主题附带的知识库引用数
 REF_CONTEXT_CHARS = 1500  # 编材料时每个引用带入的正文长度
-# rerank 相关度阈值：混合检索永远返回 top-k（哪怕全不相关，也会返回
-# 「最不相关里最靠前」的块），不看分数会把无关块误判成「知识库有资料」，
-# 堵死缺资料自动爬取的触发条件——低于阈值一律视为未命中。
-# rerank 不可用时的降级分（rrf，量纲 0~0.03）不做阈值，避免降级期误杀。
-REF_MIN_SCORE = 0.3
+# 相关度阈值统一由 hybird.RELEVANCE_MIN_SCORE 管理（对话链路同口径），
+# 此处保留别名供注释与调用方引用
+REF_MIN_SCORE = RELEVANCE_MIN_SCORE
 
 
 def _relevant_hits(hits: list[dict], min_score: float = REF_MIN_SCORE) -> list[dict]:
-    """过滤 rerank 相关度过低的命中（无 knowledge_id 的也一并剔除）"""
-    out = []
-    for h in hits:
-        if not h.get("knowledge_id"):
-            continue
-        if h.get("rerank_score") is not None and (h.get("score") or 0) < min_score:
-            continue
-        out.append(h)
-    return out
+    """过滤低相关度命中——实现见 hybird.relevant_hits（检索层统一阈值）"""
+    return relevant_hits(hits, min_score)
 
 # 任务板：目标拆解
 GOAL_DECOMPOSE_PROMPT = """你是技术学习规划助手。用户发布了一个学习目标，请拆解成 3-6 个循序渐进的学习子题：
@@ -273,81 +264,50 @@ class PlannerAgent(BaseAgent):
     # ---------- 缺资料自动爬取（设计文档 §2B-3） ----------
 
     def _should_claim(self, dao: AgentTaskDAO, task: AgentTaskModel) -> bool:
-        """learning_item 在等自动爬取：爬取任务未到终态就先不认领（保持 pending）。
+        """learning_item 在等自动补爬：整条爬取链路未到终态就先不认领（保持 pending）。
 
-        不消耗重试次数、不产生状态流转——纯粹「下轮巡检再看」。
-        爬取完成/失败/被取消（终态）后子题恢复可认领：失败也照常编材料，
-        只是没爬到新资料。
+        链路可能是单 CRAWL，也可能是 WEB_SEARCH → 子 CRAWL 两级（只跟一层，
+        不递归）。不消耗重试次数、不产生状态流转——纯粹「下轮巡检再看」。
+        链路完成/失败/被取消（终态）后子题恢复可认领：失败也照常编材料，
+        只是没爬到新资料；任务行丢失即放行，不挂死子题。
         """
         if task.kind != TaskKind.LEARNING_ITEM:
             return True
         cid = (task.payload or {}).get("crawl_task_id")
         if not cid:
             return True
-        crawl = dao.get(cid)
-        if crawl is None:
-            return True  # 爬取任务丢了（极端情况），不因此挂死子题
-        return crawl.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+        ref = dao.get(cid)
+        if ref is None:
+            return True  # 引用的任务丢了（极端情况），不因此挂死子题
+        if ref.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+            return False
+        if ref.kind == TaskKind.WEB_SEARCH and ref.status == TaskStatus.COMPLETED:
+            # 检索完成 → 看它派生的子爬取：子任务仍活跃则继续等
+            child = dao.find_child(ref.id, TaskKind.CRAWL)
+            if child is not None and child.status in (
+                TaskStatus.PENDING, TaskStatus.IN_PROGRESS
+            ):
+                return False
+        return True
 
     def _auto_crawl_topic(self, db, uid: int, topic: str) -> str | None:
-        """缺资料主题 → 用用户模型选官方文档根地址 → 提交整站浅爬。
+        """缺资料主题 → 提交联网搜索补爬（AI 生成 query → 搜索引擎 → 过滤 → 爬取）。
 
-        复用「AI 添加」的提示词与提交链路（含 SSRF 校验 + 探活 + 活跃上限），
-        爬取结果入本人个人知识库。自动补爬是增强不是依赖：任何一步失败
-        （模型不给地址 / 探活失败 / 未配置模型 / 活跃任务达上限）都静默放弃，
-        子题照常走「无引用编材料」，绝不阻断任务板。
+        返回 WEB_SEARCH 任务 id（子题的 crawl_task_id），_should_claim 会链式
+        跟随到它派生的子爬取终态。自动补爬是增强不是依赖：未配置搜索密钥/
+        未配置模型/活跃检索达上限等都静默放弃，子题照常走「无引用编材料」。
 
-        :return: crawl 任务 id；放弃返回 None
+        :return: web_search 任务 id；放弃返回 None
         """
-        from generation.prompts import AI_ADD_SYSTEM_PROMPT
-        from service.knowledge_service import (
-            CrawlSubmitError,
-            _parse_ai_add_reply,
-            probe_url,
-            submit_crawl,
-            validate_public_url,
-        )
+        from search.web_search import submit_web_search
 
         try:
-            llm = build_llm_for_user(db, uid)
-            if llm is None:
-                return None
-            reply = llm.chat(
-                [
-                    {"role": "system", "content": AI_ADD_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"我想学习「{topic}」，请帮我爬取相关文档"},
-                ],
-                temperature=0.3,
-            )
-            data = _parse_ai_add_reply(reply)
-            if not data or data.get("action") != "crawl":
-                # 模型认为主题太宽泛/需追问——任务板没有对话轮，直接放弃补爬
-                return None
-            url = validate_public_url(str(data.get("url", "")).strip())
-            ok, final_url, _title = probe_url(url)
-            if not ok:
-                return None
-            try:
-                # 自动场景收紧页数上限（默认 6、最多 10，比手动提交省成本）
-                max_pages = max(1, min(10, int(data.get("max_pages", 6))))
-            except (TypeError, ValueError):
-                max_pages = 6
-            category = (
-                str(data.get("category", "") or "general").strip().lower()[:128] or "general"
-            )
-            task_id = submit_crawl(
-                db, uid=uid, url=final_url, category=category, max_pages=max_pages
-            )
-            logger.info(
-                "[planner] 主题「%s」缺资料，已自动提交爬取：%s", topic, final_url
-            )
+            task_id = submit_web_search(db, uid, topic, source="board")
+            if task_id:
+                logger.info("[planner] 主题「%s」缺资料，已提交联网搜索补爬：%s", topic, task_id)
             return task_id
-        except CrawlSubmitError as e:
-            # 活跃爬取任务达上限（409）等：放弃该主题的自动补爬
-            logger.info("[planner] 主题「%s」自动爬取未提交：%s", topic, e)
-            return None
         except Exception as e:  # noqa: BLE001 —— 补爬失败不阻断拆解
-            logger.warning("[planner] 主题「%s」自动爬取失败（子题照常编材料）：%s", topic, e)
+            logger.warning("[planner] 主题「%s」联网补爬提交失败（子题照常编材料）：%s", topic, e)
             return None
 
     @staticmethod

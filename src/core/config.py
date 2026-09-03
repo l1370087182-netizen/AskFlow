@@ -54,6 +54,13 @@ class Settings(BaseSettings):
         description="讲解模式编排检索开关：多查询改写+跨变体 RRF 融合；关闭则回退单次查询检索",
     )
 
+        # ---------- 联网搜索补爬（博查；SEARCH_API_KEY 留空 = 整体静默关闭） ----------
+    SEARCH_PROVIDER: str = Field(default="bocha", description="搜索服务商（当前仅实现 bocha）")
+    SEARCH_API_KEY: str = Field(default="", description="博查 API Key；留空则禁用联网搜索补爬")
+    SEARCH_BASE_URL: str = Field(default="", description="搜索 API 覆盖地址，默认博查官方地址；本地联调可指向 mock 服务")
+    SEARCH_MAX_RESULTS: int = Field(default=8, description="每条检索词的候选网页数")
+    SEARCH_MAX_KEEP: int = Field(default=5, description="LLM 过滤后最多保留并爬取的页数")
+
         # ---------- Chat ----------
     CHAT_MODEL: str = Field(default="", description="对话大模型")
     CHAT_KEY: str = Field(default="", description="对话大模型密钥")

@@ -14,7 +14,7 @@ import re
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from milvus.retrieval.hybird import HybridRetriever
+from milvus.retrieval.hybird import HybridRetriever, relevant_hits
 
 from .prompts import (
     ASK_SYSTEM_PROMPT,
@@ -107,9 +107,10 @@ class ChainBuilder:
         :param uid: 请求者用户；检索时全局块+本人个人块可见（个人知识库）
         :param llm: 传入且编排开关开启时走编排检索（多查询改写+融合），
                 任何异常自动回退普通检索
-        :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源
+        :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源；
+                已经相关度阈值过滤（hybird.relevant_hits），空列表即「知识库无资料」
         """
-        results = self._search_ask(message, top_k, uid, llm)
+        results = relevant_hits(self._search_ask(message, top_k, uid, llm))
         context = format_context(results)
         # 术语兜底：卡片里有、语料里没有的知识，用术语卡片垫上
         term_card = self.term_context(message, uid)

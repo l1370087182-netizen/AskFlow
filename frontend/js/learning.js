@@ -100,10 +100,20 @@ function renderGoal(g) {
 function renderItem(it) {
   const row = document.createElement('div');
   row.className = 'kb-row';
+  const cp = it.crawl_progress;
+  const crawlActive = it.waiting_crawl && it.status === 'pending' && cp;
   let sLabel, sCls;
-  if (it.waiting_crawl && it.status === 'pending') {
-    // 缺资料自动爬取：等爬取任务终态后才编材料
-    [sLabel, sCls] = ['爬取资料中', 'badge-running'];
+  if (crawlActive) {
+    // 缺资料自动补爬：按链路阶段显示（检索中 / 排队 / 爬取中 x/y）
+    if (cp.status === 'searching') [sLabel, sCls] = ['检索资料中', 'badge-running'];
+    else if (cp.status === 'pending') [sLabel, sCls] = ['爬取排队', 'badge-pending'];
+    else {
+      const finished = (cp.done || 0) + (cp.failed || 0) + (cp.skipped || 0);
+      [sLabel, sCls] = [
+        cp.max_pages ? `爬取资料中 ${finished}/${cp.max_pages}` : '爬取资料中',
+        'badge-running',
+      ];
+    }
   } else {
     [sLabel, sCls] = ITEM_STATUS[it.status] || [it.status, ''];
   }
@@ -114,6 +124,31 @@ function renderItem(it) {
       <span class="badge ${sCls}">${sLabel}</span>
     </span>`;
   row.querySelector('.row-title').textContent = it.topic;
+
+  // 补爬链路活跃：第二行进度条（检索阶段不定长动画；爬取阶段按页数百分比）
+  if (crawlActive) {
+    row.style.flexWrap = 'wrap';
+    const wrap = document.createElement('div');
+    wrap.className = 'board-crawl-progress';
+    if (cp.status === 'searching' || !cp.max_pages) {
+      wrap.innerHTML = `
+        <div class="progress"><div class="progress-bar progress-bar-indeterminate" style="width:100%"></div></div>
+        <div class="row-meta bc-cur"></div>`;
+      wrap.querySelector('.bc-cur').textContent = cp.phase || '正在联网检索资料…';
+    } else {
+      const finished = (cp.done || 0) + (cp.failed || 0) + (cp.skipped || 0);
+      const pct = Math.min(100, Math.round(finished / cp.max_pages * 100));
+      wrap.innerHTML = `
+        <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
+        <div class="row-meta bc-cur"></div>`;
+      const cur = wrap.querySelector('.bc-cur');
+      cur.textContent = cp.current_url
+        ? '正在爬：' + (cp.current_url.length > 60 ? cp.current_url.slice(0, 60) + '…' : cp.current_url)
+        : `已完成 ${finished}/${cp.max_pages} 页`;
+    }
+    row.appendChild(wrap);
+  }
+
   if (it.status === 'completed') {
     row.style.cursor = 'pointer';
     row.title = '点击查看学习材料';

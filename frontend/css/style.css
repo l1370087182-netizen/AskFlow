@@ -374,6 +374,17 @@ a { color: var(--brand); text-decoration: none; }
   border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
 }
 
+/* 知识库无资料提示条（检索分数低于阈值，已自动联网补爬） */
+.kb-gap-note {
+  align-self: flex-start;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--amber-soft); color: var(--amber);
+  border: 1px solid var(--amber); border-radius: var(--radius);
+  padding: 9px 14px; font-size: 13px; max-width: 76%;
+}
+.kb-gap-note a { color: var(--amber); font-weight: 600; text-decoration: none; white-space: nowrap; }
+.kb-gap-note a:hover { text-decoration: underline; }
+
 /* 评分卡片 */
 .eval-card {
   background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
@@ -515,6 +526,19 @@ a { color: var(--brand); text-decoration: none; }
   height: 100%; background: linear-gradient(90deg, var(--brand), #8b5cf6);
   border-radius: 999px; transition: width .4s ease;
 }
+/* 不定长进度条：检索阶段无页数可算，用流光动画表示「进行中」 */
+.progress-bar-indeterminate {
+  background: linear-gradient(90deg, var(--brand), #8b5cf6, var(--brand));
+  background-size: 200% 100%;
+  animation: progress-flow 1.4s linear infinite;
+}
+@keyframes progress-flow {
+  from { background-position: 200% 0; }
+  to { background-position: 0 0; }
+}
+/* 任务板子题内的补爬进度（第二行，占满整行） */
+.board-crawl-progress { flex-basis: 100%; margin-top: 8px; }
+.board-crawl-progress .row-meta { margin-top: 4px; white-space: normal; word-break: break-all; }
 .crawl-pages { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
 .crawl-page-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
 .crawl-page-row .pg-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

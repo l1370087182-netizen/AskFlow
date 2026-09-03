@@ -156,6 +156,27 @@ function renderSources(bubble) {
   scrollBottom();
 }
 
+// 知识库无资料提示条（检索分数低于阈值）：插在回复气泡上方，
+// 带跳转「我的知识」看联网补爬进度的链接
+function showKbGap(ev) {
+  const note = document.createElement('div');
+  note.className = 'kb-gap-note';
+  const txt = document.createElement('span');
+  txt.textContent = '📭 ' + (ev.message || '知识库暂无相关资料');
+  note.appendChild(txt);
+  if (ev.search_task_id) {
+    const link = document.createElement('a');
+    link.href = 'kb.html';
+    link.textContent = '查看补充进度 →';
+    note.appendChild(link);
+  }
+  // 插在当前 AI 气泡（最后一个 .msg）之前
+  const lastMsg = msgList.querySelector('.msg:last-child');
+  if (lastMsg) msgList.insertBefore(note, lastMsg);
+  else msgList.appendChild(note);
+  scrollBottom();
+}
+
 // ---------- 模式与主题栏 ----------
 
 function applyModeUI() {
@@ -360,6 +381,9 @@ async function send(text, opts = {}) {
         if (ev.stage === 'evaluation' && curText === '') curBubble.textContent = '评分中…';
         applyModeUI();
       }
+    } else if (ev.type === 'kb_gap') {
+      // 知识库无资料（检索分数低于阈值）：提示条 + 已自动联网补爬
+      showKbGap(ev);
     } else if (ev.type === 'token') {
       curText += ev.content;
       curBubble.textContent = curText;

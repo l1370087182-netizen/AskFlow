@@ -78,14 +78,14 @@ class CrawlPageOut(BaseModel):
 
 
 class CrawlTaskOut(BaseModel):
-    """爬取任务进度响应（Redis 状态整体覆写）"""
+    """爬取/联网检索任务进度响应（生命周期以 agent_task 为准，Redis 供实时明细）"""
 
     task_id: str
     uid: int
     url: str
     category: str
     max_pages: int
-    status: str = Field(..., description="pending|running|done|partial|failed")
+    status: str = Field(..., description="pending|running|searching|done|partial|failed|canceled")
     done_pages: int = 0
     failed_pages: int = 0
     skipped_pages: int = 0
@@ -95,6 +95,10 @@ class CrawlTaskOut(BaseModel):
     heartbeat: float = 0.0
     created_at: float = 0.0
     finished_at: float = 0.0
+    # 联网检索（web_search 任务）扩展字段：
+    phase: str = ""               # 检索阶段文案（生成检索词/搜索中/筛选网页）
+    topic: str = ""               # 检索主题
+    child_task_id: str = ""       # 交接出的子爬取任务（服务端按 parent_id 反查填充）
 
 
 class CrawlActiveOut(BaseModel):

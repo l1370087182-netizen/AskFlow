@@ -49,6 +49,7 @@ class ProducerAgent(BaseAgent):
     def process(self, task, db) -> None:
         payload = task.payload or {}
         url = payload.get("url", "")
+        urls = payload.get("urls") or []      # 联网补爬：显式页面列表，逐页直抓不扩链
         category = payload.get("category", "general")
         try:
             max_pages = int(payload.get("max_pages", 10))
@@ -71,12 +72,17 @@ class ProducerAgent(BaseAgent):
 
         # 3) 逐页：抓取 → 校验 → AI 清洗 → upsert → 即时向量化
         crawler = ShallowCrawler(max_pages=max_pages)
+        page_source = crawler.iter_urls(urls) if urls else crawler.iter_pages(url)
         try:
-            for page in crawler.iter_pages(url):
+            for page in page_source:
                 state["current_url"] = page["url"]
                 state["heartbeat"] = time.time()
                 _try_save(r, state)
-                dao.heartbeat(task.id, self.agent_id)  # 引擎侧心跳（超时回收依据）
+                # 取消检查点 1（页头）：心跳命中 0 行 = 被取消/回收，立即终止。
+                # 取消不回滚已入库数据：此前 upsert 的页面保留在知识库。
+                if not dao.heartbeat(task.id, self.agent_id):
+                    self._abort(dao, r, task, state)
+                    return
 
                 if not page["ok"]:
                     # 抓取失败：记入失败页，逐页降级继续
@@ -93,6 +99,12 @@ class ProducerAgent(BaseAgent):
                     state["skipped_pages"] += 1
                     _try_save(r, state)
                     continue
+
+                # 取消检查点 2（AI 清洗前）：清洗是单页最耗时步骤（秒级~1 分钟），
+                # 多查一次让取消尽快生效
+                if not dao.heartbeat(task.id, self.agent_id):
+                    self._abort(dao, r, task, state)
+                    return
 
                 # AI 清洗（失败自动回退原文）→ upsert → 即时向量化
                 title = page.get("title") or page["url"]
@@ -137,7 +149,7 @@ class ProducerAgent(BaseAgent):
         state["finished_at"] = time.time()
         _try_save(r, state)
 
-        # 5) 写回任务引擎（幂等 CAS；被回收过的任务此处自动放弃）
+        # 5) 写回任务引擎（幂等 CAS；被取消/回收过的任务此处自动放弃）
         output = {
             "done_pages": state["done_pages"],
             "failed_pages": state["failed_pages"],
@@ -148,20 +160,28 @@ class ProducerAgent(BaseAgent):
             f" / 跳过 {state['skipped_pages']}"
         )
         if state["status"] == "failed":
-            dao.write_back(
+            wrote = dao.write_back(
                 task.id, self.agent_id, task.version,
                 status=TaskStatus.FAILED,
                 output={**output, "error": state.get("error", "")},
                 log_action="fail", log_desc=summary,
             )
         else:
-            dao.write_back(
+            wrote = dao.write_back(
                 task.id, self.agent_id, task.version,
                 status=TaskStatus.COMPLETED,
                 output=output,
                 log_action="complete", log_desc=summary,
             )
-            # 接力：有入库条目 → 发质检子任务（审核与生产分离）
+        if wrote is None:
+            # 取消/回收抢先：结果丢弃，也绝不派生质检子任务（防孤儿任务）
+            logger.info(
+                "[producer:%s] 任务 %s 写回冲突（已取消或被回收），丢弃结果",
+                self.agent_id, task.id,
+            )
+            return
+        # 接力：写回成功且有入库条目 → 发质检子任务（审核与生产分离）
+        if state["status"] != "failed":
             knowledge_ids = [
                 p["knowledge_id"] for p in state["pages"]
                 if p.get("ok") and p.get("knowledge_id")
@@ -178,16 +198,39 @@ class ProducerAgent(BaseAgent):
         logger.info("[producer:%s] 任务 %s 结束：%s（%s）",
                     self.agent_id, task.id, state["status"], summary)
 
+    def _abort(self, dao, r, task, state: dict) -> None:
+        """心跳探针命中 0 行 → 回读真实状态定性后终止（不 write_back、不建子任务）。
+
+        三种中断：用户取消 → 进度态置 canceled；reaper 回收/判败 → 置中断说明
+        （回收的任务会被重新认领重跑，届时进度态重置）。
+        """
+        row = dao.get(task.id)
+        if row is not None and row.status == TaskStatus.CANCELED:
+            state["status"] = "canceled"
+            state["error"] = ""
+        else:
+            state["status"] = "failed"
+            state["error"] = "任务被系统中断（超时回收或状态变更），本次执行终止"
+        state["finished_at"] = time.time()
+        _try_save(r, state)
+        logger.info(
+            "[producer:%s] 任务 %s 提前终止：%s（已入库页面保留）",
+            self.agent_id, task.id, state["status"],
+        )
+
     @staticmethod
     def _save_state(r, task, updates: dict) -> dict:
         """进度态覆写：任务 id 与入参沿用 agent_task，字段缺省补齐"""
+        payload = task.payload or {}
         state = {
             "task_id": task.id,
             "uid": task.user_id,
-            "url": (task.payload or {}).get("url", ""),
-            "category": (task.payload or {}).get("category", "general"),
-            "max_pages": int((task.payload or {}).get("max_pages", 10)),
+            "url": payload.get("url", "") or (payload.get("urls") or [""])[0],
+            "category": payload.get("category", "general"),
+            "max_pages": int(payload.get("max_pages", 10)),
             "status": "pending",
+            "topic": payload.get("topic", ""),
+            "phase": "",
             "done_pages": 0,
             "failed_pages": 0,
             "skipped_pages": 0,
@@ -197,6 +240,7 @@ class ProducerAgent(BaseAgent):
             "heartbeat": time.time(),
             "created_at": task.created_at.timestamp() if task.created_at else time.time(),
             "finished_at": 0.0,
+            "child_task_id": "",
         }
         state.update(updates)
         _try_save(r, state)

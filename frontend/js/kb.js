@@ -404,14 +404,19 @@ const crawlTasks = new Map();
 const CRAWL_STATUS_LABEL = {
   pending: '排队中',
   running: '爬取中',
+  searching: '联网检索中',
   done: '已完成',
   partial: '部分完成',
   failed: '失败',
+  canceled: '已取消',
 };
 const CRAWL_BADGE_CLASS = {
-  pending: 'badge-pending', running: 'badge-running',
+  pending: 'badge-pending', running: 'badge-running', searching: 'badge-running',
   done: 'badge-done', partial: 'badge-partial', failed: 'badge-failed',
+  canceled: 'badge-pending',
 };
+// 终态：停止轮询、隐藏取消按钮（canceled 前已入库的页面保留，列表照常刷新）
+const CRAWL_TERMINAL = ['done', 'partial', 'failed', 'canceled'];
 
 function trackCrawlTask(taskId, initialState) {
   if (crawlTasks.has(taskId)) return;
@@ -421,11 +426,13 @@ function trackCrawlTask(taskId, initialState) {
     <div class="crawl-task-head">
       <span class="ct-badge badge">等待中</span>
       <span class="ct-url row-meta"></span>
+      <button class="ct-cancel btn btn-danger-soft btn-mini" style="margin-left:auto">取消</button>
     </div>
     <div class="progress"><div class="ct-bar progress-bar" style="width:0%"></div></div>
     <div class="ct-current row-meta"></div>
     <div class="ct-pages crawl-pages"></div>
     <div class="ct-summary crawl-summary"></div>`;
+  el.querySelector('.ct-cancel').addEventListener('click', () => cancelCrawlTask(taskId));
   document.getElementById('crawl-tasks').appendChild(el);
   crawlTasks.set(taskId, { el, done: false });
   document.getElementById('crawl-panel').style.display = '';
@@ -433,6 +440,16 @@ function trackCrawlTask(taskId, initialState) {
     { status: 'pending', max_pages: 0, pages: [], current_url: '', url: '' });
   updateCrawlCount();
   ensureCrawlTimer();
+}
+
+async function cancelCrawlTask(taskId) {
+  if (!confirm('取消这个任务？已爬到的页面会保留在知识库里。')) return;
+  try {
+    await apiPostJson(`/api/knowledge/my/crawl/${taskId}/cancel`, {});
+    pollCrawlTasks();  // 立即刷一轮，状态尽快变「已取消」
+  } catch (e) {
+    alert('取消失败：' + e.message);
+  }
 }
 
 function removeCrawlTask(taskId) {
@@ -479,7 +496,14 @@ async function pollCrawlTasks() {
       continue;
     }
     renderCrawlTask(taskId, task);
-    if (['done', 'partial', 'failed'].includes(task.status)) {
+    // 联网检索交接出的子爬取任务：自动开一个新任务块跟踪
+    if (task.child_task_id && !crawlTasks.has(task.child_task_id)) {
+      trackCrawlTask(task.child_task_id, {
+        status: 'pending', max_pages: 0, pages: [], current_url: '',
+        url: task.topic || task.url || '',
+      });
+    }
+    if (CRAWL_TERMINAL.includes(task.status)) {
       rec.done = true;
       // 新入库条目排在最前，回第 1 页刷新
       loadMyList(1);
@@ -497,16 +521,31 @@ function renderCrawlTask(taskId, task) {
   badge.textContent = CRAWL_STATUS_LABEL[task.status] || task.status;
   badge.className = 'ct-badge badge ' + (CRAWL_BADGE_CLASS[task.status] || '');
 
-  if (task.url) el.querySelector('.ct-url').textContent = task.url;
+  // 联网检索任务没有种子 URL，展示检索主题
+  const headUrl = el.querySelector('.ct-url');
+  if (task.url) headUrl.textContent = task.url;
+  else if (task.topic) headUrl.textContent = '检索主题：' + task.topic;
 
   const finished = (task.done_pages || 0) + (task.failed_pages || 0) + (task.skipped_pages || 0);
   const pct = task.max_pages ? Math.min(100, Math.round(finished / task.max_pages * 100)) : 0;
-  el.querySelector('.ct-bar').style.width = pct + '%';
+  const bar = el.querySelector('.ct-bar');
+  if (task.status === 'searching') {
+    // 检索阶段无页数可算 → 不定长流光动画
+    bar.classList.add('progress-bar-indeterminate');
+    bar.style.width = '100%';
+  } else {
+    bar.classList.remove('progress-bar-indeterminate');
+    bar.style.width = pct + '%';
+  }
 
-  el.querySelector('.ct-current').textContent =
-    task.status === 'running' && task.current_url
-      ? '正在处理：' + task.current_url
-      : '';
+  const current = el.querySelector('.ct-current');
+  if (task.status === 'searching') {
+    current.textContent = task.phase || '正在联网检索…';
+  } else if (task.status === 'running' && task.current_url) {
+    current.textContent = '正在处理：' + task.current_url;
+  } else {
+    current.textContent = '';
+  }
 
   const pagesBox = el.querySelector('.ct-pages');
   pagesBox.innerHTML = '';
@@ -525,12 +564,18 @@ function renderCrawlTask(taskId, task) {
   }
 
   const summary = el.querySelector('.ct-summary');
-  if (['done', 'partial', 'failed'].includes(task.status)) {
-    let text = `结果：成功 ${task.done_pages} · 失败 ${task.failed_pages} · 跳过 ${task.skipped_pages}`;
-    if (task.error) text += ' · ' + task.error;
-    summary.textContent = text;
+  if (CRAWL_TERMINAL.includes(task.status)) {
+    if (task.status === 'canceled') {
+      summary.textContent = `任务已取消（已入库 ${task.done_pages || 0} 页，保留在知识库）`;
+    } else {
+      let text = `结果：成功 ${task.done_pages} · 失败 ${task.failed_pages} · 跳过 ${task.skipped_pages}`;
+      if (task.error) text += ' · ' + task.error;
+      summary.textContent = text;
+    }
+    el.querySelector('.ct-cancel').style.display = 'none';
   } else {
     summary.textContent = '';
+    el.querySelector('.ct-cancel').style.display = '';
   }
 }
 
@@ -544,7 +589,7 @@ async function resumeActiveCrawl() {
   }
   const live = new Set(
     (data.tasks || [])
-      .filter((t) => ['pending', 'running'].includes(t.status))
+      .filter((t) => ['pending', 'running', 'searching'].includes(t.status))
       .map((t) => t.task_id)
   );
   // 面板上残留但已不活跃（完成/过期）的任务块：移除

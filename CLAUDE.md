@@ -30,6 +30,7 @@
 | 关系库 | MySQL + SQLAlchemy + PyMySQL | 知识原始数据、会话/卡片等业务记录 |
 | 缓存/队列 | Redis | 爬虫任务队列、URL 去重、学习卡片缓存 |
 | 爬虫 | httpx + BeautifulSoup + lxml | 抓取、解析、扩链 |
+| 联网搜索 | 博查 Bocha web-search API（httpx） | 联网搜索补爬：生成检索词→搜索候选→过滤→爬取 |
 | 向量库 | Milvus（pymilvus） | 向量存储与 ANN 检索 |
 | Embedding | BAAI/bge-m3（OpenAI 兼容接口） | 文本向量化（1024 维） |
 | 关键词检索 | rank_bm25 + jieba | BM25，与向量结果混合 |
@@ -149,7 +150,17 @@ project/
     │   ├── deduplicator.py  # URL 去重器（Redis Set）✅
     │   ├── middleware.py    # 中间件（UA轮换、重试、退避）✅
     │   ├── sites.py         # 站点配置 ✅
+    │   ├── shallow_crawler.py  # 浅层爬虫（整站 BFS；iter_urls 显式列表直抓）✅
     │   └── spider_util.py   # 抓取/解析工具 ✅
+    ├── search/              # 联网搜索补爬模块 ✅（新）
+    │   ├── web_search.py    # 博查客户端 + 生成检索词/过滤候选/提交检索任务
+    │   └── prompts.py       # 检索词生成 + 候选网页过滤提示词
+    ├── agents/              # 任务引擎的各角色 Agent（生产/质检/规划/检索）
+    │   ├── producer.py      # 爬取生产者（含取消探针，逐页检查）
+    │   ├── searcher.py      # 联网检索：生成query→搜索→过滤→派生子爬取 ✅（新）
+    │   ├── planner.py       # 学习规划（含相关度阈值过滤）
+    │   └── reviewer.py / curator.py
+    ├── agent_engine/        # 任务引擎（BaseAgent 线程 + manager 装配 + reaper 回收）
     ├── evaluate/            # 知识点评估模块 ✅
     │   ├── evaluator.py     # 评分文本解析（正则+LLM兜底）与落库
     │   ├── prompts.py       # 兜底提取提示词
@@ -208,6 +219,7 @@ project/
 | 9 | 知识点评估 | ✅ 完成 | `evaluate/`（解析+评分规则）+ evaluate 表 + `/api/evaluate/*`，与费曼评分联动落库 |
 | 10 | 前端 | ✅ 完成 | 原生 HTML/CSS/JS：主页（每日卡片+跳转）+ 对话页（双模式切换、SSE 流式、评分卡片），端口 10001 |
 | 11 | 用户鉴权 + 数据隔离 | ✅ 完成 | 邮箱验证码注册/登录/忘记密码；对话/评估/面试/模型配置按用户隔离；仅新增 PyJWT 依赖 |
+| 12 | 相关度阈值 + 联网搜索补爬 + 任务治理 | ✅ 完成 | 阈值判「无资料」；博查联网补爬（SearcherAgent，异步）；取消真正生效（CAS+探针+级联）；任务板进度条 |
 
 ### 爬虫模块已完成部分清点
 
@@ -337,6 +349,21 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 
 **关键坑**：`Base.metadata.create_all` 不给已存在表补列，`scripts/init_db.py` 用 `ensure_column` 对 evaluate/jd 补 `user_id`（幂等）。改密踢下线靠 `token_ver`。Fernet 解密失败返回空串（视为未配置自定义模型），不让对话接口 500。
 
+### 7.7 相关度阈值判定 + 联网搜索补爬（新增）
+
+**① 相关度阈值（判定「知识库无资料」）**
+- 混合检索永远返回 top-k，哪怕全不相关也给「最不相关里最靠前」的块。因此用 **rerank 相关度阈值** `hybird.RELEVANCE_MIN_SCORE=0.3`：`relevant_hits()` 过滤低于阈值的命中（只过滤带 `rerank_score` 的；rerank 挂掉的 rrf 降级分不过滤，避免降级期误杀）。
+- 讲解模式 `chain.build_ask` 检索结果先过阈值——**过滤后为空即「知识库无资料」**，触发联网补爬 + 让模型用自身知识简答（回答开头标注「非知识库资料」）。
+- 任务板/学习计划编引用（`planner._collect_refs/_search_refs`）同口径过滤。
+
+**② 联网搜索补爬（AI 生成 query → 搜索引擎 → 过滤 → 爬取，异步）**
+- 触发点两处：讲解对话检索低于阈值（`source=chat`）；任务板子题缺资料（`planner._auto_crawl_topic`，`source=board`）。
+- 链路：`submit_web_search` 建 `agent_task(kind=web_search)` → `SearcherAgent` 异步执行「生成检索词（用户模型）→ 博查搜索 → 用户模型按标题/摘要/URL 过滤候选（含 SSRF 校验 + 与本人/全局知识库去重）」→ 选中的页打包成**子 `crawl` 任务**（`parent_id` 关联）交给 `ProducerAgent` 爬取入库。
+- 全程异步不阻塞：提交即返；对话只多推一个 `kb_gap` SSE 事件。
+- **取消真正生效**（配套修复）：`cancel_task` CAS 化；`producer`/`searcher` 逐页/逐阶段用 `dao.heartbeat` 返回值做取消探针（False→读 DB 定性后终止，不 write_back、不派生孤儿任务）；任务板取消会级联取消子题引用的爬取/检索链（`_cancel_crawl_chain`）。
+- **降级**：未配 `SEARCH_API_KEY` / 无用户模型 / 活跃检索达上限 → 静默跳过补爬，主流程照常。
+- 任务板进度：`GET /api/board/` 每个子题附 `crawl_progress`（页数百分比 + 当前 URL），前端用不定长动画条表示检索阶段、确定进度条表示爬取阶段。
+
 ---
 
 ## 八、接口规划
@@ -350,6 +377,13 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 | 爬虫 | POST | `/api/spider/start` | 启动爬虫（阶段 3 收尾可选） |
 | 爬虫 | GET | `/api/spider/status` | 队列长度/已访问数 |
 | 上传 | POST | `/api/knowledge/upload` | 文档上传入库（阶段 4） |
+| 个人爬取 | POST | `/api/knowledge/my/crawl` | 提交浅爬任务（202 + task_id，任务引擎异步） |
+| 个人爬取 | GET | `/api/knowledge/my/crawl/{task_id}` | 爬取/检索进度（含 searching/canceled 态） |
+| 个人爬取 | POST | `/api/knowledge/my/crawl/{task_id}/cancel` | 取消爬取/检索任务（运行中即终止） |
+| 个人爬取 | GET | `/api/knowledge/my/crawl/active` | 活跃任务列表（进度面板恢复） |
+| 任务板 | GET | `/api/board/` | 任务板视图（子题附 crawl_progress 进度条数据） |
+| 任务板 | POST | `/api/board/goals` | 发布学习目标（planner 异步拆解） |
+| 任务板 | POST | `/api/board/tasks/{id}/cancel` | 取消目标/子题，级联取消爬取/检索链 |
 | 向量化 | POST | `/api/embedding/run` | 触发入库流水线（阶段 5） |
 | 检索 | POST | `/api/retrieval/search` | 调试用检索接口（阶段 6） |
 | 对话 | POST | `/api/chat` | 双模式对话，SSE 流式（阶段 7）；body 可带 `llm` 自定义模型配置 |
@@ -405,6 +439,13 @@ CHAT_PROVIDER=auto            # openai / anthropic / auto（按地址识别）
 OCR_MODEL=Qwen/Qwen3-VL-32B-Instruct
 OCR_BASE_URL=                 # 留空复用 CHAT_BASE_URL
 OCR_KEY=                      # 留空复用 CHAT_KEY
+
+# 联网搜索补爬（博查；SEARCH_API_KEY 留空 = 静默关闭该功能）
+SEARCH_PROVIDER=bocha         # 当前仅实现 bocha
+SEARCH_API_KEY=               # 博查 API Key；留空禁用联网搜索补爬
+SEARCH_BASE_URL=              # 覆盖地址；本地联调可指向 scripts/mock_bocha_server.py
+SEARCH_MAX_RESULTS=8          # 每条检索词的候选网页数
+SEARCH_MAX_KEEP=5             # LLM 过滤后最多保留并爬取的页数
 
 # 用户鉴权（阶段 11）
 AUTH_SECRET_KEY=...           # JWT 签名 + api_key 加密派生源，必填！生成：
