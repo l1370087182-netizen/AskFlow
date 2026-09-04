@@ -51,9 +51,10 @@ def update_llm_config(
     db: Session = Depends(get_db),
 ):
     """更新模型配置。规则：
-    - base_url 空 → 清空整套配置，回服务端默认模型
-    - base_url 非空且 api_key 空 → 保留原密钥（「留空保持不变」）
-    - 原无密钥又留空 → 400
+    - base_url 空 → 清空整套配置（服务端无默认模型，清空后相关功能暂停，
+      页面会再次提示配置）
+    - base_url 非空：模型名必填（服务端不兜底）；
+      api_key 空 → 保留原密钥（「留空保持不变」）；原无密钥又留空 → 400
     """
     dao = UserDAO(db)
     base_url = body.base_url.strip()
@@ -63,6 +64,13 @@ def update_llm_config(
             user.id, provider="auto", base_url="", api_key="", model=""
         )
         return _config_out(dao, user.id)
+
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail="请填写模型名（model）——服务端不提供默认模型",
+        )
 
     api_key = body.api_key.strip()
     if not api_key:
@@ -78,6 +86,6 @@ def update_llm_config(
         provider=body.provider,
         base_url=base_url,
         api_key=api_key,
-        model=body.model.strip(),
+        model=model,
     )
     return _config_out(dao, user.id)

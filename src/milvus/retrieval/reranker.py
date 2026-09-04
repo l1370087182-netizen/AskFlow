@@ -37,7 +37,7 @@ class Reranker:
         # 归一化到服务根地址，再拼 /rerank（兼容配置里带 /embeddings 后缀的写法）
         base = base.removesuffix("/embeddings")
         self.url = base + "/rerank"
-        self.api_key = api_key or settings.EMBEDDING_KEY
+        self.api_key = api_key or settings.RERANK_KEY or settings.EMBEDDING_KEY
         self.model = model or settings.RERANK_MODEL
         self.max_retries = max_retries
         self.timeout = timeout

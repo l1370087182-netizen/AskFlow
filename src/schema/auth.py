@@ -113,8 +113,9 @@ class LLMConfigOut(BaseModel):
 class LLMConfigUpdate(BaseModel):
     """更新用户私有模型配置
 
-    - base_url 空 = 清空整套配置，回服务端默认模型
-    - base_url 非空且 api_key 空 = 保留原密钥（前端提示「留空保持不变」）
+    - base_url 空 = 清空整套配置（服务端无默认模型，清空后 AI 功能暂停）
+    - base_url 非空：模型名必填（服务端不兜底）；
+      api_key 空 = 保留原密钥（前端提示「留空保持不变」）
     """
 
     provider: Literal["auto", "openai", "anthropic"] = "auto"

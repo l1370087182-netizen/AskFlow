@@ -182,10 +182,11 @@ class ChatLLM:
 def build_llm_for_user(db, uid: int) -> ChatLLM | None:
     """按用户私有模型配置（user.llm_*）构造 ChatLLM。
 
-    未配置（base_url/api_key 任一为空）返回 None，由调用方决定语义：
-    - 对话链路：`build_llm_for_user(...) or ChatLLM()` 回退服务端默认模型；
-    - 个人知识爬取清洗：直接失败（清洗必须用用户自己的模型，
-      提交端点会在入口处 400 提示去 ⚙️ 配置）。
+    服务端不再提供默认大模型：未配置（base_url/api_key 任一为空）返回 None，
+    由调用方给用户明确提示（去 ⚙️ 配置）；后台 Agent 对 None 有自己的
+    降级路径（纯规则/跳过）。模型名留空时：anthropic 协议默认
+    claude-opus-4-8；openai 协议回退服务端 CHAT_MODEL（若配置了），
+    否则报错要求填写。
     """
     from DAO.user_dao import UserDAO  # 延迟导入，避免模块级循环依赖
 
@@ -196,7 +197,15 @@ def build_llm_for_user(db, uid: int) -> ChatLLM | None:
     model = cfg["model"].strip()
     if not model:
         resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
-        model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
+        if resolved == "anthropic":
+            model = "claude-opus-4-8"
+        elif settings.CHAT_MODEL.strip():
+            model = settings.CHAT_MODEL.strip()
+        else:
+            raise ValueError(
+                "模型配置缺少「模型名」，请到 ⚙️ 设置里补填"
+                "（如 Qwen/Qwen2.5-72B-Instruct）"
+            )
     return ChatLLM(
         provider=provider,
         base_url=cfg["base_url"].strip(),

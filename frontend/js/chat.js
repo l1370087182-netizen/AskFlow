@@ -47,16 +47,16 @@ function updateLLMBadge() {
   const text = cfg
     ? ' ' + (cfg.model || (cfg.provider === 'anthropic' ? 'claude 默认' : '自定义模型'))
       + (cfg.provider !== 'auto' ? `（${cfg.provider}）` : '')
-    : '🤖 默认模型';
+    : '🤖 未配置模型';
   const longText = cfg
     ? '自定义模型：' + (cfg.model || '默认型号') + '（⚙️ 可修改）'
-    : '默认模型（可在 ⚙️ 配置外部模型）';
+    : '未配置模型（点 ⚙️ 立即配置）';
   document.getElementById('llm-badge').textContent = longText;
   const chip = document.getElementById('model-chip');
   chip.textContent = text;
   chip.title = cfg
     ? `${cfg.base_url}（协议 ${cfg.provider}）· 点击左侧 ⚙️ 修改`
-    : '系统默认模型 · 点击左侧 ⚙️ 可配置外部模型';
+    : '系统不内置默认模型 · 点击左侧 ⚙️ 配置你自己的模型';
 }
 
 // ---------- 渲染工具 ----------
@@ -352,6 +352,7 @@ async function send(text, opts = {}) {
   let curText = '';
   let inEval = false;
   let sawError = null;
+  let sawErrorCode = '';
 
   // 收尾一个气泡：评分→换卡片；否则富文本渲染
   const closeBubble = (asEval) => {
@@ -390,6 +391,7 @@ async function send(text, opts = {}) {
       scrollBottom();
     } else if (ev.type === 'error') {
       sawError = ev.message;
+      sawErrorCode = ev.code || '';
     }
   };
 
@@ -401,7 +403,17 @@ async function send(text, opts = {}) {
 
   if (sawError) {
     curBubble.classList.remove('cursor');
-    curBubble.textContent = '⚠️ ' + sawError;
+    if (sawErrorCode === 'no_model') {
+      // 未配置模型：错误提示 + 直达配置弹窗的按钮
+      curBubble.textContent = '⚠️ ' + sawError + ' ';
+      const btn = document.createElement('button');
+      btn.className = 'link-btn';
+      btn.textContent = '打开模型配置';
+      btn.addEventListener('click', openSettings);
+      curBubble.appendChild(btn);
+    } else {
+      curBubble.textContent = '⚠️ ' + sawError;
+    }
   } else {
     const closed = closeBubble(inEval || isEvaluation(curText));
     if (mode === 'ask' && pendingSources.length && closed) renderSources(closed);
@@ -489,6 +501,8 @@ function readSettingsForm() {
 }
 
 document.getElementById('btn-settings').addEventListener('click', openSettings);
+// 供公共顶栏的「未配置模型」弹窗直接调起本页面的配置弹窗
+window.openLlmSettings = openSettings;
 document.getElementById('set-close').addEventListener('click', () => setModal.style.display = 'none');
 setModal.addEventListener('click', (e) => { if (e.target === setModal) setModal.style.display = 'none'; });
 
@@ -557,6 +571,7 @@ async function boot() {
   const q = params.get('q');
   const topic = params.get('topic');
   const deepSession = params.get('session');
+  const openParam = params.get('open');   // open=settings：直达模型配置弹窗
 
   // 模式：URL 参数优先；刷新（无参数）时恢复上次使用的模式
   if (urlMode === 'teach' || urlMode === 'ask') {
@@ -592,7 +607,7 @@ async function boot() {
   }
 
   // 跳转参数处理完立即清掉，刷新不会重复提问
-  if (q || topic || urlMode || deepSession) {
+  if (q || topic || urlMode || deepSession || openParam) {
     history.replaceState(null, '', location.pathname);
   }
 
@@ -600,7 +615,9 @@ async function boot() {
   await loadHistory();
   refreshLLMState();
 
-  if (mode === 'ask' && q) {
+  if (openParam === 'settings') {
+    openSettings();   // 顶栏弹窗「去配置」跳转过来的：直接打开配置弹窗
+  } else if (mode === 'ask' && q) {
     send(q, { auto: true });
   } else if (mode === 'teach' && topic) {
     send(topic, { auto: true });

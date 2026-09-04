@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 class InterviewAnalyzer:
     def __init__(self, llm: ChatLLM | None = None):
-        self.llm = llm or ChatLLM()
+        if llm is None:
+            raise ValueError("InterviewAnalyzer 必须传入用户模型（服务端不再提供默认模型）")
+        self.llm = llm
 
     def extract_resume(self, resume_text: str) -> dict:
         """简历 OCR 文本 → {name, skills, projects}"""

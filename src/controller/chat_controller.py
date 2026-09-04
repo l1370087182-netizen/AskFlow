@@ -48,20 +48,28 @@ def _sse(event: dict) -> str:
 
 
 def _build_llm(cfg: LLMConfig | None) -> ChatLLM:
-    """按请求里透传的自定义配置构造 ChatLLM（现仅 /ping 探测未保存配置用）"""
+    """按请求里透传的自定义配置构造 ChatLLM（现仅 /ping 探测未保存配置用）。
+
+    服务端已无默认模型：配置不完整直接抛错，由调用方转 400。
+    """
     if cfg and cfg.base_url.strip() and cfg.api_key.strip():
         provider = cfg.provider or "auto"
         model = cfg.model.strip()
         if not model:
             resolved = ChatLLM._resolve_provider(provider, cfg.base_url)
-            model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
+            if resolved == "anthropic":
+                model = "claude-opus-4-8"
+            elif settings.CHAT_MODEL.strip():
+                model = settings.CHAT_MODEL.strip()
+            else:
+                raise ValueError("请填写模型名（model）后再测试")
         return ChatLLM(
             provider=provider,
             base_url=cfg.base_url.strip(),
             api_key=cfg.api_key.strip(),
             model=model,
         )
-    return ChatLLM()
+    raise ValueError("请先完整填写 API 地址与 Key 再测试")
 
 
 def _stream_events(
@@ -224,6 +232,7 @@ def _chat_teach(
                 topic=meta["topic"],
                 rounds=cur_rounds,
                 evaluation_text=evaluation,
+                llm=llm,
             )
         except Exception:  # noqa: BLE001
             logger.exception("[chat] 评分落库失败")
@@ -319,8 +328,26 @@ def chat(body: ChatRequest, user: UserModel = Depends(get_current_user)):
         # 流式响应不能用 Depends(get_db)：
         # 端点函数返回时依赖就会关闭，而流才刚开始。改为手动管理会话。
         db = SessionLocal()
-        # 用户私有模型配置优先；未配置回退服务端默认模型（对话不挂）
-        llm = build_llm_for_user(db, uid) or ChatLLM()
+        # 服务端无默认模型：未配置个人模型直接给明确提示（前端据此弹配置入口）
+        try:
+            llm = build_llm_for_user(db, uid)
+        except ValueError as e:  # 配置了但缺模型名等
+            yield _sse({"type": "error", "code": "no_model", "message": str(e)})
+            db.close()
+            return
+        if llm is None:
+            yield _sse(
+                {
+                    "type": "error",
+                    "code": "no_model",
+                    "message": (
+                        "你还没有配置大模型。本系统不内置默认模型，"
+                        "请点页面右上角 ⚙️ 填写自己的模型（API 地址 / Key / 模型名）后再对话"
+                    ),
+                }
+            )
+            db.close()
+            return
         try:
             chain = ChainBuilder(db)
             if body.mode == "ask":

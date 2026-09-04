@@ -159,23 +159,33 @@ class OCRClient:
 
 
 def build_ocr_client_for_user(db, uid: int) -> OCRClient:
-    """按用户构建 OCR 客户端：⚙️ 个人模型优先（与对话配置同源，网页可改），
-    未配置回退服务端 OCR_*/CHAT_*。双协议均可（openai / anthropic）。
+    """按用户构建 OCR 客户端：用 ⚙️ 个人模型配置（与对话同源，网页可改）。
+
+    服务端不再提供默认视觉模型：未配置直接抛 ValueError，
+    由调用方转成明确提示（去 ⚙️ 配置）。双协议均可（openai / anthropic）。
     """
     from DAO.user_dao import UserDAO  # 延迟导入，避免模块级循环依赖
 
     cfg = UserDAO(db).get_llm_config(uid)
-    if cfg["base_url"].strip() and cfg["api_key"].strip():
-        provider = cfg["provider"] or "auto"
-        model = cfg["model"].strip()
-        if not model:
-            # 模型留空时的默认值与 build_llm_for_user 同口径
-            resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
-            model = "claude-opus-4-8" if resolved == "anthropic" else settings.CHAT_MODEL
-        return OCRClient(
-            base_url=cfg["base_url"].strip(),
-            api_key=cfg["api_key"].strip(),
-            model=model,
-            provider=provider,
+    if not (cfg["base_url"].strip() and cfg["api_key"].strip()):
+        raise ValueError(
+            "尚未配置个人模型：图片识别（OCR）需要你先在 ⚙️ 填写模型配置"
+            "（需选用支持图片输入的模型）"
         )
-    return OCRClient()
+    provider = cfg["provider"] or "auto"
+    model = cfg["model"].strip()
+    if not model:
+        # 模型留空时的默认值与 build_llm_for_user 同口径
+        resolved = ChatLLM._resolve_provider(provider, cfg["base_url"])
+        if resolved == "anthropic":
+            model = "claude-opus-4-8"
+        elif settings.CHAT_MODEL.strip():
+            model = settings.CHAT_MODEL.strip()
+        else:
+            raise ValueError("模型配置缺少「模型名」，请到 ⚙️ 设置里补填")
+    return OCRClient(
+        base_url=cfg["base_url"].strip(),
+        api_key=cfg["api_key"].strip(),
+        model=model,
+        provider=provider,
+    )

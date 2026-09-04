@@ -62,15 +62,27 @@ def analyze_jd(
     dao = JDDAO(db)
     jd = dao.create(user_id=user.id, filename=filename, image_path=str(image_path))
 
+    # 0) 个人模型检查：OCR 与解析都用 ⚙️ 用户模型（服务端无默认），缺配置直接 400
     try:
-        # 3) OCR 识别截图文字（⚙️ 个人模型优先，未配置回退服务端 OCR_*）
+        llm = build_llm_for_user(db, user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if llm is None:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置个人模型：请到「对话学习」页 ⚙️ 填写你的模型"
+            "（API 地址 / Key / 模型名，需支持图片输入）后再分析 JD",
+        )
+
+    try:
+        # 3) OCR 识别截图文字（⚙️ 个人模型配置）
         ocr = build_ocr_client_for_user(db, user.id)
         ocr_text = ocr.recognize(image_bytes, mime=MIME_MAP[suffix])
         if not ocr_text.strip():
             raise HTTPException(status_code=422, detail="OCR 未识别出任何文字")
 
-        # 4) LLM 提取结构化技术栈（个人配置优先，未配置回退服务端默认）
-        analyzer = JDAnalyzer(build_llm_for_user(db, user.id))
+        # 4) LLM 提取结构化技术栈（用户个人模型）
+        analyzer = JDAnalyzer(llm)
         result = analyzer.analyze(ocr_text)
 
         # 5) 落库

@@ -97,7 +97,19 @@ def start(
     """
     uid = user.id
 
-    # 1) OCR：视觉模型优先用 ⚙️ 个人配置（与对话同源），未配置回退服务端 OCR_*
+    # 1) 个人模型检查：OCR 与问答都用 ⚙️ 用户模型（服务端无默认），缺配置直接 400
+    try:
+        llm = build_llm_for_user(db, uid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if llm is None:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置个人模型：请到「对话学习」页 ⚙️ 填写你的模型"
+            "（API 地址 / Key / 模型名，需支持图片输入）后再开始面试",
+        )
+
+    # 2) OCR：视觉模型用 ⚙️ 个人配置（与对话同源）
     try:
         ocr_client = build_ocr_client_for_user(db, uid)
         jd_text = _ocr(jd, ocr_client)
@@ -109,20 +121,11 @@ def start(
             status_code=502,
             detail=(
                 f"截图文字识别（OCR）失败：{e}。"
-                "请确认 ⚙️ 个人模型（或服务端 OCR_MODEL）可用且支持图片输入"
+                "请确认 ⚙️ 个人模型可用且支持图片输入"
             ),
         ) from e
     if not jd_text.strip():
         raise HTTPException(status_code=422, detail="JD 未识别出文字")
-
-    # 2) LLM：与对话一致——用户个人配置优先，未配置回退服务端默认
-    try:
-        llm = build_llm_for_user(db, uid) or ChatLLM()
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{e}；可到「对话学习」页 ⚙️ 配置个人模型",
-        ) from e
 
     # 3) JD 分析 + 简历结构化
     try:
@@ -202,8 +205,17 @@ def answer(body: AnswerRequest, user: UserModel = Depends(get_current_user)):
     def generate() -> Generator[str, None, None]:
         db = SessionLocal()
         try:
-            # 个人配置优先；构造放 try 内，配置缺失走 SSE error 而非裸 500
-            llm = build_llm_for_user(db, uid) or ChatLLM()
+            # 服务端无默认模型：未配置个人模型走 SSE no_model 错误（前端弹配置入口）
+            llm = build_llm_for_user(db, uid)
+            if llm is None:
+                yield _sse(
+                    {
+                        "type": "error",
+                        "code": "no_model",
+                        "message": "尚未配置个人模型：请到「对话学习」页 ⚙️ 填写模型配置后再面试",
+                    }
+                )
+                return
             session = load_session(uid, body.session_id, "interview")
             meta = session.get("meta", {})
             jd_analysis = meta.get("jd_analysis", {})

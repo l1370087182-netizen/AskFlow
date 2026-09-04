@@ -16,7 +16,9 @@ class JDAnalyzer:
     """把 JD 文本解析成结构化技术栈"""
 
     def __init__(self, llm: ChatLLM | None = None):
-        self.llm = llm or ChatLLM()
+        if llm is None:
+            raise ValueError("JDAnalyzer 必须传入用户模型（服务端不再提供默认模型）")
+        self.llm = llm
 
     def analyze(self, jd_text: str) -> dict:
         """分析 JD 文本，返回含 title/summary/tech_stack/soft_requirements 的 dict"""

@@ -91,7 +91,13 @@ class HybridRetriever:
         fuse_top: int = 30,
     ):
         self.bm25 = BM25Retriever(db)
-        self.vector = VectorRetriever()
+        # 构造期就连不上 Milvus 也要能降级（与检索期降级同语义），
+        # 否则对话在 ChainBuilder 构造时直接挂掉
+        try:
+            self.vector = VectorRetriever()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[retrieval] 向量检索器初始化失败，本次会话降级为纯 BM25：%s", e)
+            self.vector = None
         self.reranker = Reranker()
         self.bm25_top = bm25_top
         self.vector_top = vector_top
@@ -113,13 +119,14 @@ class HybridRetriever:
         bm25_hits = self.bm25.search(
             query, top_k=self.bm25_top, category=category, uid=uid
         )
-        try:
-            vec_hits = self.vector.search(
-                query, top_k=self.vector_top, category=category, uid=uid
-            )
-        except Exception as e:  # noqa: BLE001 —— Milvus/Milvus Lite 不可用时保底
-            logger.warning("[retrieval] 向量路不可用，降级为纯 BM25：%s", e)
-            vec_hits = []
+        vec_hits: list[dict] = []
+        if self.vector is not None:
+            try:
+                vec_hits = self.vector.search(
+                    query, top_k=self.vector_top, category=category, uid=uid
+                )
+            except Exception as e:  # noqa: BLE001 —— Milvus/Milvus Lite 不可用时保底
+                logger.warning("[retrieval] 向量路不可用，降级为纯 BM25：%s", e)
 
         # 2) RRF 融合，截断到 fuse_top
         fused = rrf_fuse([bm25_hits, vec_hits])[: self.fuse_top]

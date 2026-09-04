@@ -97,8 +97,10 @@ def parse_evaluation(text: str) -> dict:
 
 
 def _llm_extract(text: str, llm: ChatLLM | None = None) -> dict:
-    """LLM 兜底：格式太自由时让模型提取结构化结果"""
-    llm = llm or ChatLLM()
+    """LLM 兜底：格式太自由时让模型提取结构化结果（用调用方的用户模型，
+    服务端无默认模型；llm 为 None 时直接抛错由上层保留正则结果）"""
+    if llm is None:
+        raise ValueError("无可用模型，跳过 LLM 兜底提取")
     prompt = EXTRACT_PROMPT.format(evaluation_text=text)
     raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.1)
     raw = raw.strip()
@@ -135,9 +137,13 @@ def save_evaluation(
     topic: str,
     rounds: int,
     evaluation_text: str,
+    llm: ChatLLM | None = None,
 ):
-    """解析评分文本并写入 evaluate 表，返回记录行（通知挂钩取分数用）"""
-    structured = extract_structured(evaluation_text)
+    """解析评分文本并写入 evaluate 表，返回记录行（通知挂钩取分数用）。
+
+    :param llm: 正则解析不出分数时的 LLM 兜底（传用户模型；None=只用正则）
+    """
+    structured = extract_structured(evaluation_text, llm)
     dao = EvaluateDAO(db)
     row = dao.create(
         user_id=user_id,

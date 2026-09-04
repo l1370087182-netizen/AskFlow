@@ -696,3 +696,26 @@ a { color: var(--brand); text-decoration: none; }
 .admin-table tbody tr:hover { background: var(--bg); }
 .admin-table .cell-email { font-weight: 600; color: var(--ink); }
 .admin-table .cell-dim { color: var(--ink-3); white-space: nowrap; }
+
+/* 未配置模型引导弹窗（顶栏 topbar-user.js 注入） */
+.model-prompt { z-index: 90; }
+.model-prompt-card { width: min(480px, 100%); gap: 6px; }
+.mp-text { font-size: 13.5px; color: var(--ink-2); line-height: 1.8; margin: 12px 0 4px; }
+.mp-text b { color: var(--ink); }
+.mp-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.mp-btn {
+  border: none; border-radius: 10px; padding: 9px 20px;
+  font-size: 13.5px; cursor: pointer; font-weight: 600;
+}
+.mp-btn.mp-later { background: var(--bg); color: var(--ink-2); }
+.mp-btn.mp-later:hover { background: var(--line); }
+.mp-btn.mp-go { background: var(--brand); color: #fff; }
+.mp-btn.mp-go:hover { filter: brightness(1.06); }
+
+/* 气泡里的行内文字按钮（如「打开模型配置」） */
+.link-btn {
+  border: none; background: none; padding: 0; margin-left: 2px;
+  color: var(--brand); font-size: inherit; font-weight: 600;
+  cursor: pointer; text-decoration: underline;
+}
+.link-btn:hover { filter: brightness(1.15); }

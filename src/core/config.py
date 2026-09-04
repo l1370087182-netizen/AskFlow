@@ -46,7 +46,8 @@ class Settings(BaseSettings):
 
         # ---------- Rerank ----------
     RERANK_MODEL: str = Field(default="BAAI/bge-reranker-v2-m3", description="重排序模型")
-    RERANK_BASE_URL: str = Field(default="", description="重排序API地址，留空则复用 EMBEDDING_BASE_URL 同域")
+    RERANK_BASE_URL: str = Field(default="", description="重排序API服务根地址（代码自动拼 /rerank），留空则复用 EMBEDDING_BASE_URL 同域")
+    RERANK_KEY: str = Field(default="", description="重排序专用密钥，留空复用 EMBEDDING_KEY")
 
         # ---------- 编排检索 ----------
     RETRIEVAL_ORCHESTRATOR: bool = Field(

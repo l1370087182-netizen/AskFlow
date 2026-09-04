@@ -28,7 +28,7 @@
 
 - **讲解模式（AI 当老师）**：只基于检索片段作答，「是什么 → 为什么 → 怎么用 → 示例」结构化讲解
 - **费曼模式（AI 当学生）**：你当老师讲给 AI 听，它逐轮追问挑毛病，结束后输出**总结复述 + 1-10 评分 + 讲对/讲错/遗漏清单**，评分自动落库
-- **双协议接入**：OpenAI 兼容协议（httpx 直连）/ Anthropic Messages 协议（官方 SDK），`CHAT_PROVIDER=auto` 按地址自动识别；用户可在 ⚙️ 配置自己的模型（api_key 服务端 Fernet 加密）
+- **双协议接入**：OpenAI 兼容协议（httpx 直连）/ Anthropic Messages 协议（官方 SDK）。**服务端不内置默认模型**：用户注册后需在 ⚙️ 配置自己的模型（API 地址 / Key / 模型名，服务端 Fernet 加密存储），未配置时登录后自动弹窗引导；对话、面试、OCR、知识清洗统一走用户模型
 
 ### 🎯 学习闭环
 
@@ -172,7 +172,8 @@ EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_KEY=sk-xxx
 EMBEDDING_BASE_URL=https://xxx/v1/embeddings
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_BASE_URL=                    # 留空复用 EMBEDDING_BASE_URL 同域
+RERANK_BASE_URL=                    # 服务根地址（代码自动拼 /rerank），留空复用 EMBEDDING_BASE_URL 同域
+RERANK_KEY=                         # 留空复用 EMBEDDING_KEY
 
 # ---- MySQL / Redis ----
 MYSQL_HOST=127.0.0.1
@@ -193,14 +194,16 @@ MILVUS_HOST=127.0.0.1               # standalone 模式
 MILVUS_PORT=19530
 MILVUS_LITE_PATH=                   # 非空则用嵌入式 Milvus Lite（本地文件路径）
 
-# ---- 对话大模型（双协议）----
-CHAT_MODEL=...                      # 如 Qwen/Qwen2.5-72B-Instruct 或 claude-opus-4-8
-CHAT_KEY=sk-xxx
-CHAT_BASE_URL=...                   # OpenAI 兼容地址或 Anthropic 地址（含中转站）
+# ---- 对话大模型：可留空 ----
+# 产品策略：服务端不内置默认模型，每个用户登录后在 ⚙️ 配置自己的模型；
+# 留空即无服务端兜底。如需恢复默认兜底再填写：
+CHAT_MODEL=                         # 如 Qwen/Qwen2.5-72B-Instruct 或 claude-opus-4-8
+CHAT_KEY=
+CHAT_BASE_URL=                      # OpenAI 兼容地址或 Anthropic 地址（含中转站）
 CHAT_PROVIDER=auto                  # openai / anthropic / auto（按地址识别）
 
-# ---- 视觉 OCR（默认复用 CHAT_*）----
-OCR_MODEL=Qwen/Qwen3-VL-32B-Instruct
+# ---- 视觉 OCR（同对话：用用户 ⚙️ 模型；以下为可选服务端兜底，一般留空）----
+OCR_MODEL=
 OCR_BASE_URL=                       # 留空复用 CHAT_BASE_URL
 OCR_KEY=                            # 留空复用 CHAT_KEY
 

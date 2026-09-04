@@ -204,7 +204,7 @@ project/
 - **tech_term（技术术语表，每日卡片数据源）**：`term`（术语，唯一，如 aigc）、`alias`（别名，逗号分隔）、`category`、`brief`（一句话简介）、`detail`（详细讲解）、`example`（示例）、`source_url`。由 `scripts/seed_terms.py` 从已入库文章标题 + LLM 辅助提炼，归一化判重（忽略大小写/空格/连字符），可重复执行扩充；`--enrich` 模式为存量术语补 `detail`/`example`。
 - **jd / tech_stack（JD 分析，阶段 8）**：`jd` 存截图路径 + OCR 文本 + 职位标题/概括 + 分析原文；`tech_stack` 按 `jd_id` 存技术条目（名称/分类/required-bonus/JD 语境）。
 - **evaluate（费曼讲解评分记录，阶段 9）**：`session_id`、`topic`、`rounds`（追问轮数）、`score`（0-10，可空）、`summary`（总结复述）、`correct_points` / `wrong_points` / `missed_points`（JSON 数组）、`raw`（评分 markdown 原文）。由对话接口在评分产生时联动写入。**阶段 11 加 `user_id` 列（可空、索引），按用户隔离；存量行留 NULL 作废。**
-- **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=用服务端默认）、`created_at` / `updated_at`。
+- **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=未配置，功能入口会给弹窗/400 引导）、`created_at` / `updated_at`。
 - **jd 表（阶段 11 补 `user_id` 列）**：同 evaluate，按用户隔离，存量行留 NULL 作废。
 - **notification（站内通知，阶段 13）**：`user_id`、`type`（task_done/task_failed/evaluation/interview）、`title` / `body` / `link`（前端深链接）、`ref_id`（关联任务/会话/记录，删目标时按它清通知）、`is_read`、`created_at`。写入挂钩在 `agent_task_dao.write_back/fail_task` 尾部（CAS 保证每终态恰触发一次）+ 费曼评分/面试总评落库点；通知用**独立 Session** 写入（防污染任务会话）；每用户保留最近 200 条。
 
@@ -314,7 +314,13 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - 评分记录落库（阶段 9 已联动）：评分产生时由 `evaluate/evaluator.py` 解析（正则优先、LLM 兜底）写入 evaluate 表
 - 注意：**总结评分轮要切换成「评分员」系统提示**（退出学生人设）。沿用学生人设时模型会抗拒结束、继续追问，导致评分格式解析失败
 
-**记忆**：会话历史按「用户 + 会话」以 JSON 存 `sessions/{user_id}/{id}_{mode}.json`（阶段 11 起加用户子目录，天然隔离他人会话）。讲解/费曼两种模式历史完全分开：侧边栏按模式各自列出、独立新建/删除。对话页工具栏有显眼的当前模型徽标，用户可在 ⚙️ 自配 OpenAI/Anthropic 模型——**配置存服务端 user 表（api_key Fernet 加密），按用户隔离，不再随请求透传**（`/api/chat` 不再消费请求体 `llm` 字段，改读当前登录用户的库内配置）。
+**记忆**：会话历史按「用户 + 会话」以 JSON 存 `sessions/{user_id}/{id}_{mode}.json`（阶段 11 起加用户子目录，天然隔离他人会话）。讲解/费曼两种模式历史完全分开：侧边栏按模式各自列出、独立新建/删除。对话页工具栏有显眼的当前模型徽标。
+
+**模型自带（v0.9 起，服务端无默认模型）**：对话 / 面试 / JD-OCR / 费曼评分兜底等一切用户可见的 LLM 调用都走**用户自己 ⚙️ 配置的模型**，`.env` 的 `CHAT_*` / `OCR_*` 留空、不再兜底。规则：
+- `build_llm_for_user()` 返回 None（未配置）时：对话/面试 SSE 发 `{"type":"error","code":"no_model",...}`；JD 分析/知识爬取等入口直接 400，文案统一引导「去 ⚙️ 配置」
+- 后台 Agent（producer/reviewer/curator/planner/searcher）用任务属主的模型，None 时各自降级（纯规则/跳过），不受影响
+- 前端：`topbar-user.js` 登录后检测 `/api/user/llm` 未配置 → 弹窗引导（一会话最多一次，跳 `chat.html?open=settings`）；`chat.js` 收到 `no_model` 错误气泡内给「打开模型配置」按钮
+- 配置存服务端 user 表（api_key Fernet 加密），按用户隔离，不随请求透传（`/api/chat` 不消费请求体 `llm` 字段；`/api/chat/ping` 除外，仅探测未保存配置）
 
 **③ 双协议接入（v0.4 新增）——OpenAI 兼容 / Anthropic Messages**
 
@@ -453,16 +459,18 @@ REDIS_HOST / REDIS_PORT / REDIS_PASSWORD / REDIS_DB
 MILVUS_HOST=127.0.0.1
 MILVUS_PORT=19530
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_BASE_URL=              # 留空复用 EMBEDDING_BASE_URL 同域
+RERANK_BASE_URL=              # 服务根地址（代码自动拼 /rerank），留空复用 EMBEDDING_BASE_URL 同域
+RERANK_KEY=                   # 留空复用 EMBEDDING_KEY
 
-# 对话大模型（双协议，用户自填接入点）
-CHAT_MODEL=...                # 如 Qwen/Qwen2.5-72B-Instruct 或 claude-opus-4-8
-CHAT_KEY=sk-xxx
-CHAT_BASE_URL=...             # OpenAI 兼容地址或 Anthropic 地址（含中转站）
+# 对话大模型（v0.9 起：可留空。服务端不内置默认模型，用户登录后 ⚙️ 自带模型；
+# 留空即无兜底，未配置用户会收到弹窗/400 引导。如需恢复兜底再填写）
+CHAT_MODEL=                   # 如 Qwen/Qwen2.5-72B-Instruct 或 claude-opus-4-8
+CHAT_KEY=
+CHAT_BASE_URL=                # OpenAI 兼容地址或 Anthropic 地址（含中转站）
 CHAT_PROVIDER=auto            # openai / anthropic / auto（按地址识别）
 
-# 视觉 OCR（JD 截图识别，默认复用 Chat 的地址与密钥）
-OCR_MODEL=Qwen/Qwen3-VL-32B-Instruct
+# 视觉 OCR（v0.9 起：可留空。OCR 也走用户 ⚙️ 自带模型；以下仅可选服务端兜底）
+OCR_MODEL=                    # 原默认 Qwen/Qwen3-VL-32B-Instruct
 OCR_BASE_URL=                 # 留空复用 CHAT_BASE_URL
 OCR_KEY=                      # 留空复用 CHAT_KEY
 

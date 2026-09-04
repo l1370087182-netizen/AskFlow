@@ -53,8 +53,51 @@
 
       refreshDot();
       setInterval(refreshDot, POLL_MS);
+
+      maybePromptModel();   // 未配置大模型 → 弹窗引导（每个浏览器会话最多一次）
     })
     .catch(() => { /* 401 已由 apiGet 跳转；其他网络错误不打扰 */ });
+
+  // ---------- 未配置模型弹窗 ----------
+
+  async function maybePromptModel() {
+    // 管理员不用模型；本会话已弹过不再打扰
+    if (localStorage.getItem('rag_role') === 'admin') return;
+    if (sessionStorage.getItem('rag_model_prompted')) return;
+    let cfg;
+    try {
+      cfg = await apiGet('/api/user/llm');
+    } catch (e) { return; }
+    if (cfg.has_custom) return;
+    sessionStorage.setItem('rag_model_prompted', '1');
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask model-prompt';
+    mask.innerHTML = `
+      <div class="modal small model-prompt-card" role="dialog" aria-modal="true">
+        <div class="modal-head"><h3>🧩 先配置你的大模型</h3></div>
+        <p class="mp-text">
+          问渠 AskFlow 不内置默认模型——对话学习、模拟面试、知识清洗等 AI 能力都使用
+          <b>你自己的模型</b>（按你的 API 用量计费，账号隔离）。<br>
+          你还没有配置，现在就去填一下吧：<b>API 地址 / Key / 模型名</b>，配置一次全站通用。
+        </p>
+        <div class="mp-actions">
+          <button class="mp-btn mp-later">暂不</button>
+          <button class="mp-btn mp-go">去配置</button>
+        </div>
+      </div>`;
+    document.body.appendChild(mask);
+    mask.querySelector('.mp-later').addEventListener('click', () => mask.remove());
+    mask.querySelector('.mp-go').addEventListener('click', () => {
+      mask.remove();
+      // 在对话页就直接弹配置窗，否则跳过去并自动打开
+      if (location.pathname.endsWith('chat.html') && window.openLlmSettings) {
+        window.openLlmSettings();
+      } else {
+        location.href = 'chat.html?open=settings';
+      }
+    });
+  }
 
   // ---------- 红点 ----------
 
