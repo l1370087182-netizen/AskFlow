@@ -103,11 +103,17 @@ def _parse_json(raw: str) -> dict | None:
     return None
 
 
-def generate_queries(llm, topic: str) -> list[str]:
-    """主题 → 1~2 条检索词；解析失败回退用主题本身"""
+def generate_queries(llm, topic: str, goal: str = "") -> list[str]:
+    """主题 → 1~2 条检索词；解析失败回退用主题本身
+
+    :param goal: 学习目标全景（任务板拆解场景），有它检索词更贴用户真实意图
+    """
+    prompt = QUERY_GEN_PROMPT + f"\n\n【学习主题】{topic}"
+    if goal.strip():
+        prompt += f"\n【学习目标全景】{goal.strip()}（子题只是其中一角，检索词服务于整体目标）"
     try:
         raw = llm.chat(
-            [{"role": "user", "content": QUERY_GEN_PROMPT + f"\n\n【学习主题】{topic}"}],
+            [{"role": "user", "content": prompt}],
             temperature=0.3,
         )
         data = _parse_json(raw)
@@ -121,11 +127,29 @@ def generate_queries(llm, topic: str) -> list[str]:
     return [topic]
 
 
-def filter_candidates(llm, db, uid: int, topic: str, candidates: list[dict]) -> list[dict]:
+def _wants_papers(goal: str) -> bool:
+    """学习目标里明确点名要论文/学术资料时，才放行论文摘要页"""
+    return bool(re.search(r"论文|文献|学术|研究|paper|arxiv", goal, re.IGNORECASE))
+
+
+def _is_paper_page(url: str) -> bool:
+    """URL 层面识别论文摘要页 / PDF（代码层硬拦，不依赖模型自觉）"""
+    u = (url or "").lower()
+    if u.endswith(".pdf"):
+        return True
+    return bool(re.search(r"arxiv\.org/(abs|pdf)|biorxiv\.org|ssrn\.com", u))
+
+
+def filter_candidates(
+    llm, db, uid: int, topic: str, candidates: list[dict], goal: str = ""
+) -> list[dict]:
     """LLM 按编号挑选有价值页面，逐条做安全与去重校验，返回 [{url, title}]。
 
-    校验：SSRF（validate_public_url）+ 与本人/全局知识库已有 URL 去重，
-    不合格的静默剔除；全部被剔 → 返回空（调用方走「无资料」）。
+    :param goal: 学习目标全景（任务板拆解场景），透传给筛选提示词，
+                 让模型以目标而非子题字面判断相关性
+    校验：SSRF（validate_public_url）+ 论文摘要页/PDF 代码层硬拦 +
+    与本人/全局知识库已有 URL 去重，不合格的静默剔除；
+    全部被剔 → 返回空（调用方走「无资料」）。
     """
     from DAO.knowledge_dao import KnowledgeDAO
     from service.knowledge_service import validate_public_url
@@ -136,8 +160,14 @@ def filter_candidates(llm, db, uid: int, topic: str, candidates: list[dict]) -> 
     lines = []
     for i, c in enumerate(candidates, 1):
         lines.append(f"{i}. {c.get('title', '')}\n   摘要：{c.get('snippet', '')[:120]}\n   网址：{c.get('url', '')}")
+    goal_line = (
+        f"\n\n学习目标全景：{goal.strip()}（子题只是其中一角，与目标明显无关的不要）"
+        if goal.strip()
+        else ""
+    )
     prompt = FILTER_PROMPT.format(
         topic=topic,
+        goal_line=goal_line,
         max_keep=settings.SEARCH_MAX_KEEP,
         candidates="\n\n".join(lines),
     )
@@ -166,6 +196,11 @@ def filter_candidates(llm, db, uid: int, topic: str, candidates: list[dict]) -> 
         cand = candidates[idx]
         url = cand.get("url", "")
         if not url or url in seen_urls:
+            continue
+        # 论文摘要页/PDF 代码层硬拦（学习目标明确要论文才放行）：
+        # 摘要页单看「内容充实」，规则/LLM 质检都拦不住，但对学习没价值
+        if _is_paper_page(url) and not _wants_papers(goal):
+            logger.info("[web-search] 剔除论文/PDF 页：%s", url)
             continue
         try:
             url = validate_public_url(url)
@@ -206,9 +241,10 @@ def find_pages(db, llm, uid: int, topic: str) -> list[dict]:
 
 # ---------- 提交联网检索任务（异步入口） ----------
 
-def submit_web_search(db, uid: int, topic: str, source: str) -> str | None:
+def submit_web_search(db, uid: int, topic: str, source: str, goal: str = "") -> str | None:
     """提交联网检索补爬任务（kind=web_search，searcher 异步消费）。
 
+    :param goal: 学习目标全景（任务板拆解场景），随 payload 透传给检索/筛选
     静默降级返回 None：无用户模型 / 未配置密钥 / 活跃检索达上限。
     :return: web_search 任务 id（子题/对话用它跟踪整条链路）
     """
@@ -230,7 +266,7 @@ def submit_web_search(db, uid: int, topic: str, source: str) -> str | None:
         task = dao.create(
             kind=TaskKind.WEB_SEARCH,
             user_id=uid,
-            payload={"topic": topic, "source": source},
+            payload={"topic": topic, "source": source, "goal": (goal or "").strip()},
             agent="api",
         )
         logger.info("[web-search] 已提交检索任务 %s（topic=%s source=%s）", task.id, topic, source)

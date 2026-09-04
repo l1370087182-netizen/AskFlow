@@ -374,6 +374,7 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 **② 联网搜索补爬（AI 生成 query → 搜索引擎 → 过滤 → 爬取，异步）**
 - 触发点两处：讲解对话检索低于阈值（`source=chat`）；任务板子题缺资料（`planner._auto_crawl_topic`，`source=board`）。
 - 链路：`submit_web_search` 建 `agent_task(kind=web_search)` → `SearcherAgent` 异步执行「生成检索词（用户模型）→ 博查搜索 → 用户模型按标题/摘要/URL 过滤候选（含 SSRF 校验 + 与本人/全局知识库去重）」→ 选中的页打包成**子 `crawl` 任务**（`parent_id` 关联）交给 `ProducerAgent` 爬取入库。
+- **相关性以学习目标全景判断**：任务板拆解场景 planner 把 goal 随 payload 透传给检索词生成与候选筛选（子题只是目标一角，防止爬回字面沾边、实际无关的内容）；论文摘要页/PDF/arXiv 链接代码层硬拦（目标明确要论文才放行）——摘要页单看「充实」但学不到东西。
 - 全程异步不阻塞：提交即返；对话只多推一个 `kb_gap` SSE 事件。
 - **取消真正生效**（配套修复）：`cancel_task` CAS 化；`producer`/`searcher` 逐页/逐阶段用 `dao.heartbeat` 返回值做取消探针（False→读 DB 定性后终止，不 write_back、不派生孤儿任务）；任务板取消会级联取消子题引用的爬取/检索链（`_cancel_crawl_chain`）。
 - **降级**：未配 `SEARCH_API_KEY` / 无用户模型 / 活跃检索达上限 → 静默跳过补爬，主流程照常。

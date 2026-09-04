@@ -184,7 +184,7 @@ class PlannerAgent(BaseAgent):
         crawl_ids: dict[str, str] = {}
         for it in items:
             if not refs.get(it["topic"]):
-                cid = self._auto_crawl_topic(db, task.user_id, it["topic"])
+                cid = self._auto_crawl_topic(db, task.user_id, it["topic"], goal=goal_text)
                 if cid:
                     crawl_ids[it["topic"]] = cid
 
@@ -300,8 +300,11 @@ class PlannerAgent(BaseAgent):
                 return False
         return True
 
-    def _auto_crawl_topic(self, db, uid: int, topic: str) -> str | None:
+    def _auto_crawl_topic(self, db, uid: int, topic: str, goal: str = "") -> str | None:
         """缺资料主题 → 提交联网搜索补爬（AI 生成 query → 搜索引擎 → 过滤 → 爬取）。
+
+        goal 为学习目标全景，随 payload 透传：检索词生成与候选筛选都以
+        整体目标（而非子题字面）判断相关性，避免爬回只沾边的内容。
 
         返回 WEB_SEARCH 任务 id（子题的 crawl_task_id），_should_claim 会链式
         跟随到它派生的子爬取终态。自动补爬是增强不是依赖：未配置搜索密钥/
@@ -312,7 +315,7 @@ class PlannerAgent(BaseAgent):
         from search.web_search import submit_web_search
 
         try:
-            task_id = submit_web_search(db, uid, topic, source="board")
+            task_id = submit_web_search(db, uid, topic, source="board", goal=goal)
             if task_id:
                 logger.info("[planner] 主题「%s」缺资料，已提交联网搜索补爬：%s", topic, task_id)
             return task_id

@@ -58,6 +58,9 @@ class SearcherAgent(BaseAgent):
                 "error": "未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型",
             })
             raise TaskPermanentError("未配置个人大模型")
+        # 学习目标全景：任务板拆解场景由 planner 随 payload 透传，
+        # 检索词与候选筛选都以目标（而非子题字面）判断相关性
+        goal = str(payload.get("goal", "")).strip()
 
         # 2) 进度态开局：searching（前端不定长动画条）
         state = self._save_state(r, task, {"status": "searching", "phase": "生成检索词"})
@@ -67,7 +70,7 @@ class SearcherAgent(BaseAgent):
         try:
             if not self._check_alive(dao, r, task, state):
                 return
-            queries = generate_queries(llm, topic)
+            queries = generate_queries(llm, topic, goal=goal)
             state["phase"] = "搜索候选网页"
             self._note(f"搜索候选网页：{topic[:30]}")
             _try_save(r, state)
@@ -93,7 +96,7 @@ class SearcherAgent(BaseAgent):
             state["phase"] = "筛选有价值网页"
             self._note(f"筛选候选网页：{len(candidates)} 条")
             _try_save(r, state)
-            selected = filter_candidates(llm, db, task.user_id, topic, candidates)
+            selected = filter_candidates(llm, db, task.user_id, topic, candidates, goal=goal)
         except Exception as e:  # noqa: BLE001 —— 意外异常：进度态置失败后走引擎重试
             state["status"] = "failed"
             state["error"] = f"检索执行异常：{e}"
