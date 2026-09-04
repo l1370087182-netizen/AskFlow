@@ -719,3 +719,14 @@ a { color: var(--brand); text-decoration: none; }
   cursor: pointer; text-decoration: underline;
 }
 .link-btn:hover { filter: brightness(1.15); }
+
+/* 向量化失败横幅（知识库详情/重试） */
+.vec-error-box {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 10px 14px;
+  border: 1px solid var(--red-soft); border-radius: 8px;
+  background: var(--red-soft); color: var(--red);
+  font-size: 13px; line-height: 1.5;
+}
+.vec-error-box b { flex: none; }
+.vec-error-box .act-retry { flex: none; color: var(--red); }

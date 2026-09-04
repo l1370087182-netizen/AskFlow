@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 _ingest_lock = threading.Lock()
 
 
+def _err_summary(e: Exception, limit: int = 500) -> str:
+    """异常 → 可落库的原因摘要（去换行防串行，截断到列宽内）"""
+    return f"{type(e).__name__}: {e}".replace("\n", " ")[:limit]
+
+
 class IngestionPipeline:
     """向量化入库流水线"""
 
@@ -61,7 +66,7 @@ class IngestionPipeline:
         for row in rows:
             try:
                 n = self._ingest_one(row)
-                self.dao.update_status(row.id, KnowledgeModel.STATUS_EMBEDDED)
+                self.dao.update_status(row.id, KnowledgeModel.STATUS_EMBEDDED)  # error 默认清除
                 stats["success"] += 1
                 stats["chunks"] += n
                 logger.info(
@@ -69,7 +74,9 @@ class IngestionPipeline:
                     row.id, row.title, n,
                 )
             except Exception as e:  # noqa: BLE001 —— 单篇失败不中断整轮
-                self.dao.update_status(row.id, KnowledgeModel.STATUS_FAILED)
+                self.dao.update_status(
+                    row.id, KnowledgeModel.STATUS_FAILED, error=_err_summary(e)
+                )
                 stats["failed"] += 1
                 logger.exception(
                     "[ingestion] id=%s《%s》向量化失败：%s", row.id, row.title, e
@@ -91,8 +98,10 @@ class IngestionPipeline:
                 "[ingestion] id=%s《%s》即时入库 %s 块", row.id, row.title, n
             )
             return n
-        except Exception:
-            self.dao.update_status(row.id, KnowledgeModel.STATUS_FAILED)
+        except Exception as e:
+            self.dao.update_status(
+                row.id, KnowledgeModel.STATUS_FAILED, error=_err_summary(e)
+            )
             logger.exception(
                 "[ingestion] id=%s《%s》即时向量化失败", row.id, row.title
             )

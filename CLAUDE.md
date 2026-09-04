@@ -197,6 +197,7 @@ project/
 | status | int | 0=待向量化，1=已向量化，2=失败 |
 | quality_score | float NULL | 质量门禁知识价值分 0-10（LLM 评）；NULL=未评/待补审，手工/上传恒豁免 |
 | quality_reason | varchar(255) NULL | 质量判定理由 |
+| vector_error | varchar(512) NULL | 向量化失败原因摘要（status=2 时有值，成功/待处理清空；前端知识库页展示 + 可一键重试） |
 | created_at / updated_at | datetime | 时间戳 |
 
 ### 5.2 后续建的表（✅ 均已建）

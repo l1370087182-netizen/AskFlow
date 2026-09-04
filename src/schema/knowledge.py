@@ -12,6 +12,9 @@ class KnowledgeItem(BaseModel):
     category: str
     source_type: str
     status: int = Field(..., description="0=待向量化，1=已向量化，2=向量化失败")
+    vector_error: str | None = Field(
+        default=None, description="向量化失败原因摘要（status=2 时有值）"
+    )
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

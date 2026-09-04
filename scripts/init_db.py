@@ -183,6 +183,13 @@ def main() -> None:
             "quality_reason VARCHAR(255) NULL COMMENT '质量判定理由'",
         )
 
+    # 向量化失败原因（幂等）：knowledge 补 vector_error（存量行 NULL=无失败记录）
+    with engine.connect() as conn:
+        ensure_column(
+            conn, "knowledge", "vector_error",
+            "vector_error VARCHAR(512) NULL COMMENT '向量化失败原因摘要'",
+        )
+
     # 抽查：表是否都存在
     with engine.connect() as conn:
         for table in ("knowledge", "tech_term", "jd", "tech_stack", "evaluate", "user", "agent_task", "interview_record", "notification"):

@@ -83,6 +83,10 @@ class KnowledgeModel(Base):
     quality_reason: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None, comment="质量判定理由"
     )
+    # 向量化失败原因（status=2 时有值；成功/待处理时清空）
+    vector_error: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, default=None, comment="向量化失败原因摘要"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now, comment="创建时间"
     )

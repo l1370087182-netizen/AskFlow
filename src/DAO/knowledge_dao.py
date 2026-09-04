@@ -205,12 +205,19 @@ class KnowledgeDAO:
         self.db.refresh(row)
         return row
 
-    def update_status(self, knowledge_id: int, status: int) -> bool:
-        """更新知识状态"""
+    def update_status(
+        self, knowledge_id: int, status: int, error: str | None = None
+    ) -> bool:
+        """更新知识状态。
+
+        :param error: 失败原因摘要（status=2 时随行写入 vector_error；
+                      传 None 表示清除——成功/回待处理时置空）
+        """
         row = self.get_by_db(knowledge_id)
         if not row:
             return False
         row.status = status
+        row.vector_error = error
         self.db.commit()
         return True
 

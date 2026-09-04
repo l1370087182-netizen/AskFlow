@@ -105,9 +105,18 @@ async function loadList(category, page = 1) {
     row.innerHTML = `
       <span class="row-title"></span>
       <span class="row-meta">${statusLabel(item.status)} · ${sourceLabel(item.source_type)}` +
-      (item.created_at ? ' · ' + item.created_at.slice(0, 10) : '') + '</span>';
+      (item.created_at ? ' · ' + item.created_at.slice(0, 10) : '') + '</span>' +
+      (item.status === 2
+        ? ' <button class="btn btn-ghost btn-mini act-retry" type="button">重试向量化</button>'
+        : '');
     row.querySelector('.row-title').textContent = item.title;
     row.addEventListener('click', () => openDetail(item.id));
+    if (item.status === 2) {
+      row.querySelector('.act-retry').addEventListener('click', (e) => {
+        e.stopPropagation();
+        retryVector(item.id);
+      });
+    }
     listBox.appendChild(row);
   }
   renderPager(pagerBox, data.total, page, (p) => loadList(category, p));
@@ -136,7 +145,15 @@ async function openDetail(id) {
     `<span class="category-tag">${categoryLabel(d.category)}</span>` +
     `<span class="row-meta">${sourceLabel(d.source_type)} · ` +
     (d.created_at ? d.created_at.slice(0, 10) : '') + '</span>' + link;
-  document.getElementById('modal-body').innerHTML = renderKnowledge(d.content);
+  // 向量化失败的条目：顶部给原因横幅 + 重试按钮（详情正文照常可看）
+  const vecBanner = d.status === 2
+    ? `<div class="vec-error-box"><b>向量化失败</b>：${escHtml(d.vector_error || '未知原因（旧数据未记录原因）')}` +
+      ` <button class="btn btn-ghost btn-mini act-retry" type="button">重试向量化</button></div>`
+    : '';
+  document.getElementById('modal-body').innerHTML = vecBanner + renderKnowledge(d.content);
+  if (d.status === 2) {
+    document.querySelector('#modal-body .act-retry').addEventListener('click', () => retryVector(d.id));
+  }
   document.getElementById('kb-modal').style.display = '';
 
   // 按需翻译：记住原文，翻译按钮复位
@@ -237,11 +254,20 @@ async function loadMyList(page = myPage) {
       <span class="row-right">
         <span class="row-meta">${statusLabel(item.status)} · ${sourceLabel(item.source_type)}` +
         (item.created_at ? ' · ' + item.created_at.slice(0, 10) : '') + `</span>
+        ` + (item.status === 2
+          ? '<button class="btn btn-ghost btn-mini act-retry" type="button">重试向量化</button>'
+          : '') + `
         <button class="btn btn-ghost btn-mini act-edit" type="button">编辑</button>
         <button class="btn btn-danger-soft btn-mini act-del" type="button">删除</button>
       </span>`;
     row.querySelector('.row-title').textContent = item.title;
     row.addEventListener('click', () => openDetail(item.id));
+    if (item.status === 2) {
+      row.querySelector('.act-retry').addEventListener('click', (e) => {
+        e.stopPropagation();
+        retryVector(item.id);
+      });
+    }
     row.querySelector('.act-edit').addEventListener('click', (e) => {
       e.stopPropagation();
       openEditModal(item.id);
@@ -253,6 +279,22 @@ async function loadMyList(page = myPage) {
     listBox.appendChild(row);
   }
   renderPager(pagerBox, data.total, page, (p) => loadMyList(p));
+}
+
+// 重试向量化（status=2 条目）：重置回待处理并立即跑流水线，成功后刷新视图
+async function retryVector(id) {
+  try {
+    const r = await apiPostJson(`/api/embedding/retry?knowledge_id=${id}`, {});
+    if (r.failed > 0) {
+      alert(`重试后仍失败：${r.failed} 条。请稍后再试，或检查嵌入服务配置`);
+    } else {
+      alert(`向量化成功（切 ${r.chunks} 块）`);
+    }
+    openDetail(id);      // 刷新弹窗（横幅消失 = 已恢复）
+    loadMyList();        // 顺带刷新「我的知识」列表角标
+  } catch (e) {
+    alert('重试失败：' + e.message);
+  }
 }
 
 async function deleteMy(id, title) {

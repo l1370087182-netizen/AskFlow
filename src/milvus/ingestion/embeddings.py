@@ -48,7 +48,7 @@ class EmbeddingClient:
         return vectors
 
     def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        """单批请求，失败线性退避重试（1s、2s、3s...）"""
+        """单批请求，指数退避重试（1s、2s、4s...）：限流/网络抖动场景更稳"""
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {"model": self.model, "input": batch}
         last_err: Exception | None = None
@@ -66,6 +66,6 @@ class EmbeddingClient:
             except Exception as e:  # noqa: BLE001 —— 网络/限流/5xx 都走重试
                 last_err = e
                 if attempt < self.max_retries:
-                    time.sleep(attempt)
+                    time.sleep(2 ** (attempt - 1))
 
         raise RuntimeError(f"Embedding 请求失败（重试 {self.max_retries} 次）: {last_err}")
