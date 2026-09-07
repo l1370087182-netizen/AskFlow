@@ -1,11 +1,14 @@
 // 学习任务板：发布目标 → planner 拆解子题 → 逐题学习材料
 // 交互：前端分页（每页 5 条）+ 抽屉式目标卡片 + 取消/删除 + 深链定位（?goal=）
-// 侧栏：左=Agent 实时动态（/api/board/agents），右=work_log 查看器
-// 轮询：页面可见就 3s 一轮（任务数据 + Agent 动态一起刷），不再「全终态停轮询」
+// 侧栏：左=Agent 角色泳道（气泡三态：忙碌脉冲/巡检/空闲，按 agent_id 原地更新不闪烁），
+//       右=work_log 时间线（重绘保滚动/贴底跟随、新条目高亮、复制全部）
+// 窄屏：三页签互斥切换（任务板/Agent/日志），点气泡看日志自动跳日志页签
+// 轮询：页面可见就 3s 一轮（任务数据 + Agent 动态一起刷）；本地 1s tick 只刷新忙碌气泡的时长文本
 
 const boardList = document.getElementById('board-list');
 const boardState = document.getElementById('board-state');
-const agentsList = document.getElementById('agents-list');
+const agentsLanes = document.getElementById('agents-lanes');
+const agentsSummary = document.getElementById('agents-summary');
 const worklogBody = document.getElementById('worklog-body');
 
 const PAGE_SIZE = 5;
@@ -36,6 +39,11 @@ const KIND_ZH = {
   crawl: '爬取', web_search: '联网检索', quality_review: '质检',
   term_curate: '术语整理', study_plan: '学习计划',
   learning_goal: '目标拆解', learning_item: '学习材料',
+};
+const KIND_ICON = {
+  crawl: '📥', web_search: '🌐', quality_review: '🔎',
+  term_curate: '📇', study_plan: '📋',
+  learning_goal: '🧭', learning_item: '📖',
 };
 const LOG_ACTION_ZH = {
   create: '创建', claim: '认领', complete: '完成',
@@ -325,45 +333,104 @@ document.getElementById('item-modal').addEventListener('click', (e) => {
   if (e.target.id === 'item-modal') document.getElementById('item-modal').style.display = 'none';
 });
 
-// ---------- 左栏：Agent 动态 ----------
+// ---------- 左栏：Agent 角色泳道 ----------
+// 结构：每个角色一条泳道，行内一个气泡/实例。轮询按 agent_id 原地更新
+// （不整栏重绘 → 无闪烁）；忙碌气泡的持续时长由本地 1s tick 递增。
+
+const LANE_ORDER = ['爬取生产', '联网检索', '知识质检', '术语整理', '学习规划', '超时回收'];
+const laneEls = new Map();     // role -> lane 元素
+const bubbleEls = new Map();   // agent_id -> { el, timeEl, state, since, taskId }
 
 async function loadAgents() {
   let data;
   try { data = await apiGet('/api/board/agents'); } catch (e) { return; }
-  agentsList.innerHTML = '';
-  for (const a of data.agents || []) agentsList.appendChild(renderAgent(a));
+  const agents = data.agents || [];
+  const seen = new Set();
+
+  for (const a of agents) {
+    seen.add(a.agent_id);
+    const lane = ensureLane(a.role);
+    let b = bubbleEls.get(a.agent_id);
+    if (!b) { b = createBubble(a, lane); bubbleEls.set(a.agent_id, b); }
+    updateBubble(b, a);
+  }
+  // Agent 池缩容等场景：消失的实例摘除气泡
+  for (const [id, b] of bubbleEls) {
+    if (!seen.has(id)) { b.el.remove(); bubbleEls.delete(id); }
+  }
+  // 泳道高亮按实际气泡状态重算（同角色多实例一忙一闲时不受更新顺序影响）
+  for (const [role, lane] of laneEls) {
+    const anyBusy = [...bubbleEls.values()].some((b) =>
+      (b.state === 'working' || b.state === 'watching') && lane.contains(b.el));
+    lane.classList.toggle('active', anyBusy);
+  }
+  const working = agents.filter((a) => a.status === 'working').length;
+  agentsSummary.textContent = agents.length ? `忙碌 ${working} / 共 ${agents.length} 个 Agent` : '';
 }
 
-function renderAgent(a) {
-  const card = document.createElement('div');
-  const working = a.status === 'working';
-  card.className = 'agent-card' + (working ? ' working' : '');
-  const statusTxt = working ? '工作中' : a.status === 'watching' ? '巡检中' : '空闲';
-  const cls = working ? 'badge-running' : a.status === 'watching' ? 'badge-mine' : 'badge-pending';
-  card.innerHTML = `
-    <div class="ag-head">
-      <span>${a.role}${/^producer-\d+$/.test(a.agent_id) ? '' : ''}</span>
-      <span class="badge ${cls}">${statusTxt}</span>
-    </div>
-    <div class="ag-desc"></div>
-    <div class="ag-time"></div>`;
-  const desc = card.querySelector('.ag-desc');
-  const timeEl = card.querySelector('.ag-time');
-  if (working) {
-    desc.textContent = a.desc || (a.kind ? `处理 ${KIND_ZH[a.kind] || a.kind} 任务` : '处理任务中');
-    if (a.since) timeEl.textContent = '已持续 ' + duration(Date.now() / 1000 - a.since);
-    if (a.task_id) {
-      card.style.cursor = 'pointer';
-      card.title = '点击查看该任务日志';
-      card.addEventListener('click', () => loadWorklog(a.task_id));
-    }
-  } else if (a.status === 'watching') {
-    desc.textContent = a.desc || '';
-  } else {
-    desc.textContent = '等待新任务';
-  }
-  return card;
+function ensureLane(role) {
+  if (laneEls.has(role)) return laneEls.get(role);
+  const lane = document.createElement('div');
+  lane.className = 'lane';
+  lane.innerHTML = `
+    <span class="lane-name"></span>
+    <div class="lane-track"></div>`;
+  lane.querySelector('.lane-name').textContent = role;
+  // 固定顺序插入；未知角色排后面
+  const idx = LANE_ORDER.indexOf(role);
+  const next = [...laneEls.entries()]
+    .filter(([r]) => LANE_ORDER.indexOf(r) > idx || (idx < 0 && LANE_ORDER.indexOf(r) >= 0))
+    .map(([, el]) => el)[0];
+  agentsLanes.insertBefore(lane, next || null);
+  laneEls.set(role, lane);
+  return lane;
 }
+
+function createBubble(a, lane) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = 'bubble';
+  el.innerHTML = `
+    <span class="b-dot"></span>
+    <span class="b-kind"></span>
+    <span class="b-time"></span>`;
+  el.addEventListener('click', () => {
+    const b = bubbleEls.get(a.agent_id);
+    if (b && b.taskId) loadWorklog(b.taskId);
+  });
+  lane.querySelector('.lane-track').appendChild(el);
+  return { el, timeEl: el.querySelector('.b-time'), kindEl: el.querySelector('.b-kind'),
+           state: '', since: 0, taskId: '' };
+}
+
+function updateBubble(b, a) {
+  const el = b.el;
+  const working = a.status === 'working';
+  const watching = a.status === 'watching';
+  el.classList.toggle('working', working);
+  el.classList.toggle('watching', watching);
+  el.classList.toggle('idle', !working && !watching);
+
+  b.state = a.status;
+  b.since = working ? (a.since || 0) : 0;
+  b.taskId = a.task_id || '';
+  b.kindEl.textContent = working ? (KIND_ICON[a.kind] || '⚙') : '';
+
+  const desc = a.desc || (working && a.kind ? `处理 ${KIND_ZH[a.kind] || a.kind} 任务` : '');
+  el.title = desc ? `${desc}${b.taskId ? '\n（点击查看日志）' : ''}`
+    : watching ? '巡检中' : '空闲';
+  el.classList.toggle('clickable', !!b.taskId);
+  b.timeEl.textContent = working && b.since ? duration(Date.now() / 1000 - b.since) : '';
+}
+
+// 本地秒表：忙碌气泡的时长文本每秒递增（轮询间隔 3s，精度靠它补）
+setInterval(() => {
+  for (const b of bubbleEls.values()) {
+    if (b.state === 'working' && b.since) {
+      b.timeEl.textContent = duration(Date.now() / 1000 - b.since);
+    }
+  }
+}, 1000);
 
 function duration(sec) {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -372,18 +439,37 @@ function duration(sec) {
   return Math.floor(sec / 3600) + ' 小时';
 }
 
-// ---------- 右栏：work_log 查看器 ----------
+// ---------- 右栏：work_log 查看器（时间线） ----------
+// 重绘策略：记录滚动位置与「贴底跟随」状态，重绘后还原——执行中的任务
+// 每 3s 刷新一次，用户翻看历史时不再被弹回顶部；贴底时新条目自动滚入并高亮。
+
+let wlPrevKeys = null;     // 上次渲染的日志 key 集合（切任务时重置，首次不高亮）
 
 async function loadWorklog(taskId, silent = false) {
+  if (!silent) setMobileTab('log');   // 主动看日志：窄屏切到日志页签（桌面端无副作用）
   let d;
   try { d = await apiGet(`/api/board/tasks/${taskId}`); }
   catch (e) {
     if (!silent) worklogBody.innerHTML = '<p class="row-meta">任务不存在或无权查看</p>';
     curWorklogTask = null;
+    wlPrevKeys = null;
     return;
   }
+  if (curWorklogTask !== taskId) { wlPrevKeys = null; worklogBody._wlScroll = null; }   // 换任务：不高亮、贴底看最新
   curWorklogTask = taskId;
   renderWorklog(d);
+}
+
+function logKey(w) { return `${w.ts}|${w.action}|${w.agent || ''}|${w.description || ''}`; }
+
+function relTime(ts) {
+  const t = Date.parse(ts || '');
+  if (isNaN(t)) return '';
+  const sec = Math.max(0, (Date.now() - t) / 1000);
+  if (sec < 60) return Math.floor(sec) + ' 秒前';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
 }
 
 function renderWorklog(d) {
@@ -391,37 +477,118 @@ function renderWorklog(d) {
     { pending: ['排队中', 'badge-pending'], in_progress: ['执行中', 'badge-running'],
       completed: ['已完成', 'badge-done'], failed: ['失败', 'badge-failed'],
       canceled: ['已取消', 'badge-pending'] }[d.status] || [d.status, ''];
+  const live = ['pending', 'in_progress'].includes(d.status);
+  const logs = d.work_log || [];
+
   let html = `
     <div class="wl-head">
-      <b>${KIND_ZH[d.kind] || d.kind}</b>
+      <b></b>
       <span class="badge ${sCls}">${sLabel}</span>
-    </div>`;
-  const logs = d.work_log || [];
+      ${live ? '<span class="wl-live">实时跟随中</span>' : ''}
+      ${logs.length ? '<button type="button" class="btn btn-ghost btn-mini wl-copy">复制全部</button>' : ''}
+    </div>
+    <div class="wl-list">`;
   if (!logs.length) {
-    html += '<p class="row-meta">暂无日志</p>';
+    html += '<p class="row-meta">暂无日志</p></div>';
     worklogBody.innerHTML = html;
+    wlPrevKeys = new Set();
     return;
   }
-  html += '<div class="wl-list">';
   for (const w of logs) {
     const action = LOG_ACTION_ZH[w.action] || w.action;
-    const ts = (w.ts || '').replace('T', ' ').slice(0, 16);
+    const full = (w.ts || '').replace('T', ' ');
     html += `
       <div class="wl-entry">
         <div class="wl-action">${action} <span class="row-meta">· ${w.agent || ''}</span></div>
         ${w.description ? `<div class="wl-desc"></div>` : ''}
-        <div class="wl-time">${ts}</div>
+        <div class="wl-time" title="${full}"></div>
       </div>`;
   }
   html += '</div>';
   worklogBody.innerHTML = html;
-  // description 用 textContent 填入防注入
+
+  worklogBody.querySelector('.wl-head b').textContent = KIND_ZH[d.kind] || d.kind;
   const entries = worklogBody.querySelectorAll('.wl-entry');
   logs.forEach((w, i) => {
-    const descEl = entries[i] && entries[i].querySelector('.wl-desc');
+    const descEl = entries[i].querySelector('.wl-desc');
     if (descEl) descEl.textContent = w.description || '';
+    const tEl = entries[i].querySelector('.wl-time');
+    if (tEl) tEl.textContent = relTime(w.ts);
+  });
+
+  // 新条目高亮：与上次该任务的 key 集合对比（首次渲染不闪）
+  const keys = logs.map(logKey);
+  const newSet = wlPrevKeys ? keys.filter((k) => !wlPrevKeys.has(k)) : [];
+  entries.forEach((el, i) => { if (newSet.includes(keys[i])) el.classList.add('wl-new'); });
+  wlPrevKeys = new Set(keys);
+
+  // 滚动：贴底跟随（新条目自动滚入），翻看历史则保持原位
+  const list = worklogBody.querySelector('.wl-list');
+  const prev = worklogBody._wlScroll;
+  if (prev && !prev.bottom) {
+    list.scrollTop = prev.top;
+  } else {
+    list.scrollTop = list.scrollHeight;   // 贴底 / 首次渲染都看最新
+  }
+  list.addEventListener('scroll', () => {
+    worklogBody._wlScroll = {
+      top: list.scrollTop,
+      bottom: list.scrollTop + list.clientHeight >= list.scrollHeight - 30,
+    };
+  }, { passive: true });
+
+  // 复制全部
+  const copyBtn = worklogBody.querySelector('.wl-copy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      const text = logs.map((w) =>
+        `[${(w.ts || '').replace('T', ' ')}] ${LOG_ACTION_ZH[w.action] || w.action}`
+          + `${w.agent ? ' · ' + w.agent : ''}`
+          + (w.description ? ` — ${w.description}` : '')
+      ).join('\n');
+      copyText(text, copyBtn);
+    });
+  }
+}
+
+function copyText(text, btn) {
+  const done = () => {
+    const old = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { /* 忽略 */ }
+  ta.remove();
+}
+
+// ---------- 窄屏页签：任务板 / Agent / 日志 三选一 ----------
+// 桌面端三栏全显，页签隐藏（CSS 控制）；窄屏按 body class 互斥显示
+
+function setMobileTab(tab) {   // 'board' | 'agents' | 'log'
+  document.body.classList.toggle('mtab-agents', tab === 'agents');
+  document.body.classList.toggle('mtab-log', tab === 'log');
+  document.querySelectorAll('.bmtab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === tab);
   });
 }
+
+document.querySelectorAll('.bmtab').forEach((b) => {
+  b.addEventListener('click', () => setMobileTab(b.dataset.tab));
+});
 
 // ---------- 轮询（页面可见就开，不再全终态停） ----------
 
