@@ -26,3 +26,7 @@ dump.rdb
 
 # 部署包（含密钥与数据 dump，绝不入库）
 deploy/
+
+# SSL 证书私钥/证书，绝不入库
+*.pem
+*.key
