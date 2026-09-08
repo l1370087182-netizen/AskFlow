@@ -20,6 +20,7 @@ import threading
 
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from model.KnowledgeModel import KnowledgeModel
 
 from .embeddings import EmbeddingClient
@@ -38,6 +39,21 @@ def _err_summary(e: Exception, limit: int = 500) -> str:
     return f"{type(e).__name__}: {e}".replace("\n", " ")[:limit]
 
 
+def _needs_graph(row: KnowledgeModel) -> bool:
+    """该条内容是否需要【流水线】建图（避免与 reviewer 质检搭车建图重复）。
+
+    - 个人爬取（source_type=personal 且真实 URL）：producer 向量化的【同时】reviewer
+      质检会搭车抽实体/关系建图（零额外成本），流水线跳过，否则同一篇建两遍灌 weight。
+    - 手工条目（personal + source_url=manual://…）、上传（upload）、全局爬虫（spider）：
+      质检【不覆盖】（手工/上传豁免；全局爬虫不走 Agent 引擎），由流水线建图。
+    """
+    st = (row.source_type or "").lower()
+    url = row.source_url or ""
+    if st == "personal" and not url.startswith("manual://"):
+        return False  # 个人爬取 → reviewer 建图，流水线不重复
+    return True
+
+
 class IngestionPipeline:
     """向量化入库流水线"""
 
@@ -47,6 +63,7 @@ class IngestionPipeline:
         vector_store: VectorStore | None = None,
         embedding_client: EmbeddingClient | None = None,
     ):
+        self.db = db  # 建图时取属主模型 / 写 kg_node·kg_edge 用
         self.loader = KnowledgeLoader(db)
         self.dao = self.loader.dao  # 复用同一个 DAO 回写状态，共享 Session
         # 默认复用进程级单例：Milvus Lite 单进程独占，避免重复建连接
@@ -73,6 +90,7 @@ class IngestionPipeline:
                     "[ingestion] id=%s《%s》切 %s 块，向量化入库成功",
                     row.id, row.title, n,
                 )
+                self._maybe_build_graph(row)  # 向量化成功后顺带建图（可降级，不影响入库）
             except Exception as e:  # noqa: BLE001 —— 单篇失败不中断整轮
                 self.dao.update_status(
                     row.id, KnowledgeModel.STATUS_FAILED, error=_err_summary(e)
@@ -97,6 +115,7 @@ class IngestionPipeline:
             logger.info(
                 "[ingestion] id=%s《%s》即时入库 %s 块", row.id, row.title, n
             )
+            self._maybe_build_graph(row)  # 向量化成功后顺带建图（可降级，不影响入库）
             return n
         except Exception as e:
             self.dao.update_status(
@@ -123,3 +142,44 @@ class IngestionPipeline:
 
             vectors = self.embedder.embed_texts([c.text for c in chunks])
             return self.store.insert_chunks(chunks, vectors)
+
+    def _maybe_build_graph(self, row: KnowledgeModel) -> None:
+        """向量化成功后顺带建知识图谱（实体节点 + 共现边 + 关系边）。
+
+        只处理 reviewer 质检【不覆盖】的内容（见 _needs_graph）：手工/上传/全局爬虫。
+        个人爬取由 reviewer 搭车建图，这里跳过避免重复灌 weight。
+
+        全程可降级，绝不阻断入库：
+        - 开关关 / 个人爬取 → 直接跳过
+        - 无可用模型（全局内容 user_id=0、或属主未配置）→ 跳过并留痕，
+          之后可由 scripts/backfill_kg.py 借模型补建
+        - 抽取/写图任何异常 → 记日志跳过，向量化结果不受影响
+        """
+        if not settings.KG_BUILD_ON_INGEST or not _needs_graph(row):
+            return
+        try:
+            from generation.llm import build_llm_for_user  # 延迟导入，避免模块级循环
+
+            llm = build_llm_for_user(self.db, row.user_id)
+            if llm is None:
+                logger.info(
+                    "[ingestion] id=%s 无可用模型（全局内容/属主未配置），跳过建图；"
+                    "可由 scripts/backfill_kg.py 借模型补建", row.id,
+                )
+                return
+
+            from agents.quality import extract_graph
+            from DAO.kg_dao import KgDAO
+
+            entities, triples = extract_graph(llm, row.title, row.category, row.content)
+            if not (entities or triples):
+                return
+            n = KgDAO(self.db).learn_document(
+                row.user_id, entities, row.category, triples
+            )
+            logger.info(
+                "[ingestion] id=%s《%s》建图：%s 节点 / %s 关系",
+                row.id, row.title, n, len(triples),
+            )
+        except Exception as e:  # noqa: BLE001 —— 建图是增强，故障绝不影响向量化
+            logger.warning("[ingestion] id=%s 建图失败（跳过）：%s", row.id, e)

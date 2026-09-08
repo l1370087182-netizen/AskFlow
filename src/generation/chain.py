@@ -7,6 +7,8 @@
 「卡片里有、语料里没有」——消息里命中术语时，把术语卡片一并拼进上下文。
 图谱扩展（§7.9）：命中的术语若在知识图谱里有强共现邻居，把邻居实体拼进
 BM25 查询做扩展（只扩 BM25，向量查询保持原问题）；图谱为空/异常时零影响。
+多跳推理（§7.9 A+B）：嵌套关系问题（如「X的上司的上司是谁」）走 generation.multihop
+——LLM 拆解→图谱有向关系边遍历导航→逐跳检索取证；非多跳/图谱空/异常退回单跳。
 """
 from __future__ import annotations
 
@@ -132,10 +134,29 @@ class ChainBuilder:
         # 查询（一次 match_term 两个用途）；没命中/图谱为空 → 检索原样进行
         term = self.match_term(message, uid)
         term_card = format_term_card(term) if term else ""
-        results = relevant_hits(
-            self._search_ask(message, top_k, uid, llm, self.kg_expansion(term, uid))
-        )
-        context = format_context(results)
+
+        # 多跳推理（A+B）：嵌套关系问题先图谱遍历导航、再逐跳检索取证；
+        # 非多跳/图谱空/无证据/任何异常 → mh 为 None，退回下面的单跳检索
+        mh = None
+        if settings.MULTIHOP and llm is not None:
+            try:
+                from generation.multihop import MultiHopRetriever
+
+                mh = MultiHopRetriever(self.db, self.retriever, llm).build(
+                    message, uid, top_k
+                )
+            except Exception as e:  # noqa: BLE001 —— 多跳异常退回单跳
+                logger.warning("[chain] 多跳检索异常，退回单跳：%s", e)
+                mh = None
+
+        if mh is not None:
+            results = mh["results"]
+            context = mh["context"]
+        else:
+            results = relevant_hits(
+                self._search_ask(message, top_k, uid, llm, self.kg_expansion(term, uid))
+            )
+            context = format_context(results)
         if term_card:
             context += "\n\n" + term_card
         system = ASK_SYSTEM_PROMPT.format(context=context)

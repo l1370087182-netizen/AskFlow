@@ -5,6 +5,8 @@
 > 协作约定：助手可直接读写仓库代码（v0.3 起取消「代码全部手写」限制），改动需与本文档的架构和目录约定保持一致，关键决策做简要说明。
 > v0.8 新增：用户鉴权（邮箱验证码注册/登录/忘记密码）+ 全部用户数据按账号隔离（对话/评估/面试/模型配置），见「阶段 11」。
 > v0.8.1 新增：轻量知识图谱——质检 LLM 调用搭车抽实体建图（kg_node/kg_edge），讲解模式命中术语卡时用图谱强邻居做 BM25 查询扩展，见 §7.9。
+> v0.8.2 新增：图谱升级为「共现边 + 有向关系边」（质检搭车再抽三元组），新增多跳推理（嵌套关系问题如「X的上司的上司」→ 图谱遍历导航 + 逐跳检索取证），见 §7.9。
+> v0.8.3 新增：建图覆盖全部入库内容——爬取走质检搭车，豁免质检的手工/上传/全局内容走向量化流水线专用抽取（`extract_graph`，开关 `KG_BUILD_ON_INGEST`），存量文档用 `scripts/backfill_kg.py` 借模型补建；全局内容无默认模型，靠 backfill 补，见 §7.9。
 
 ---
 
@@ -146,6 +148,8 @@ project/
     ├── generation/          # LLM 生成模块
     │   ├── llm.py                  # Chat 客户端（流式，双协议：OpenAI 兼容 / Anthropic Messages）
     │   ├── prompts.py              # 讲解模式/费曼模式提示词
+    │   ├── retrieval_orchestrator.py # 编排检索：多查询改写+跨变体 RRF 融合（可降级）
+    │   ├── multihop.py             # 多跳推理编排：图谱遍历导航+逐跳检索取证（§7.9 A+B）✅
     │   └── chain.py                # 检索结果+历史+提示词 组装
     ├── ocr/                 # OCR 模块（JD截图识别，视觉模型实现）✅
     │   └── ocr_client.py
@@ -211,7 +215,7 @@ project/
 - **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=未配置，功能入口会给弹窗/400 引导）、`created_at` / `updated_at`。
 - **jd 表（阶段 11 补 `user_id` 列）**：同 evaluate，按用户隔离，存量行留 NULL 作废。
 - **notification（站内通知，阶段 13）**：`user_id`、`type`（task_done/task_failed/evaluation/interview）、`title` / `body` / `link`（前端深链接）、`ref_id`（关联任务/会话/记录，删目标时按它清通知）、`is_read`、`created_at`。写入挂钩在 `agent_task_dao.write_back/fail_task` 尾部（CAS 保证每终态恰触发一次）+ 费曼评分/面试总评落库点；通知用**独立 Session** 写入（防污染任务会话）；每用户保留最近 200 条。
-- **kg_node / kg_edge（知识图谱，§7.9）**：实体节点表（`user_id` 归属 0=全局/>0=个人、`name`、`category`、`term_id` 关联 tech_term、`mention_count`）+ 共现边表（`src_id`/`dst_id` 无向存一份 src<dst、`relation`（当前仅 cooccur）、`weight` 共现次数）。节点 (user_id,name) 唯一、边 (user_id,src,dst,relation) 唯一，均由 init_db `create_all` 建表。
+- **kg_node / kg_edge（知识图谱，§7.9）**：实体节点表（`user_id` 归属 0=全局/>0=个人、`name`、`category`、`term_id` 关联 tech_term、`mention_count`）+ 边表（`src_id`/`dst_id`、`relation`、`weight`）。边分两类靠 `relation` 区分：`cooccur` 共现边**无向**（src<dst 存一份）、实际关系词（如「上司」）的关系边**有向**（src=主体→dst=客体，v0.8.2 多跳推理用）；`weight` 累计出现次数。节点 (user_id,name) 唯一、边 (user_id,src,dst,relation) 唯一（同对节点可同时有共现边和关系边），均由 init_db `create_all` 建表，无 schema 迁移。
 
 ---
 
@@ -396,16 +400,24 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - **范围**：门禁只管**爬取**内容；手工添加/上传豁免（用户对自己的内容负责）。
 - **存量清理** `scripts/review_personal_kb.py --user <id>`：默认 `--dry-run` 采样评分供校准，`--apply` 分片（≤50）建补审质检任务；只碰 `user_id>0` 且排除 `manual://`；`--max-rows` 熔断。
 
-### 7.9 轻量知识图谱（实体 + 共现边，v0.8.1 新增）
+### 7.9 轻量知识图谱（实体 + 共现边 + 关系边/多跳推理，v0.8.1 起，v0.8.2 关系边+多跳，v0.8.3 建图覆盖全部入库）
 
-图谱当**组织层/增强层**而非独立检索层：不引入新存储组件（两张 MySQL 表），建图零额外 LLM 成本（搭车），检索侧纯增量可降级。
+图谱当**组织层/增强层**而非独立检索层：不引入新存储组件（两张 MySQL 表），检索侧纯增量可降级。v0.8.2 把「只有共现边」升级为「共现边 + 有向关系边」，新增多跳推理消费方（A+B：图谱导航 + 逐跳检索取证）。v0.8.3 让建图**覆盖全部入库内容**（不再只爬取质检）：爬取走质检搭车（零额外 LLM 成本），豁免质检的手工/上传/全局内容走向量化流水线的专用抽取（`extract_graph`，一次 LLM 调用），存量文档用 `scripts/backfill_kg.py` 借模型补建。
 
-- **建图搭车在质检评分上**：`agents/quality.py` 的 `QUALITY_PROMPT` 在打分的同时要求输出 `entities`（≤8 个核心技术概念），`score_content` 返回三元组 `(score, reason, entities)`——一次 LLM 调用两份产出，不增加成本。实体解析独立于评分解析（`parse_entities`），解析失败只意味「这次没实体」，绝不连累评分去留。
-- **reviewer 落图**：keep 且有实体时调 `KgDAO.learn_document` 建节点/共现边（尽力而为，try 包裹，图谱故障不影响质检结果）；写回 output 带 `kg_entities` 计数。丢弃的知识不建图。
-- **节点判重归一化**（与 tech_term 同口径，忽略大小写/空格/连字符）：跨文档 `DI 容器`/`DI容器` 合一节点，重复出现 `mention_count` 累计；匹配得上 tech_term 的节点挂 `term_id`。归属沿用 0=全局/>0=个人，个人图谱仅本人可见。
-- **边 = 同篇共现**：单篇实体两两连边（src<dst 存一份），每共同出现一篇 `weight+1`；单篇实体上限 8（`MAX_NODES_PER_DOC`）。
-- **检索查询扩展（当前唯一消费方）**：讲解模式消息命中术语卡时（`chain.build_ask` 的 `match_term`），`KgDAO.expansion_terms` 取该术语节点的强共现邻居（全局+本人锚点合并，按 weight 降序，最多 3 个），拼进 **BM25 查询**（`hybird.apply_expansion`，截断 100 字符）——专治「口语化问法与文档零词面重合」；**向量查询保持原问题**不稀释语义。编排检索路径每个变体同样受益。
-- **零风险降级**：没命中术语/图谱为空/表未建/任何异常 → 扩展词为空，检索照常按原问题执行。
+- **建图搭车在质检评分上**：`agents/quality.py` 的 `QUALITY_PROMPT` 在打分的同时要求输出 `entities`（≤8 个核心技术概念）与 `relations`（≤6 条有向三元组 `[主体,关系,客体]`，只抽正文明确陈述的关系），`score_content` 返回四元组 `(score, reason, entities, triples)`——一次 LLM 调用三份产出，不增加成本。实体/关系解析各自独立于评分解析（`parse_entities` / `parse_triples`），解析失败只意味「这次没实体/没关系」，绝不连累评分去留。
+- **reviewer 落图**：keep 且有实体或三元组时调 `KgDAO.learn_document(uid, entities, category, triples)` 建节点 + 共现边 + 关系边（尽力而为，try 包裹，图谱故障不影响质检结果）；写回 output 带 `kg_entities` 计数。丢弃的知识不建图。
+- **建图三入口（v0.8.3 覆盖全部入库）**：① **个人爬取** → reviewer 质检搭车（`score_content` 顺带抽，零额外 LLM 成本）；② **手工/上传/全局爬虫等豁免质检的内容** → 向量化流水线 `IngestionPipeline._maybe_build_graph` 用专用 `agents/quality.extract_graph`（只抽实体+关系、不打分，一次 LLM 调用）建图，开关 `KG_BUILD_ON_INGEST`，`_needs_graph` 靠 `source_type`+`manual://` 前缀**跳过个人爬取**避免与 reviewer 重复灌 weight，向量化成功后才建、try 包裹绝不阻断入库；③ **存量文档** → `scripts/backfill_kg.py`。**全局内容（user_id=0）服务端无默认模型**（`build_llm_for_user(db,0)` 恒 None）：流水线遇 None 跳过并留痕，只能靠 backfill `--model-user <id>` 借某用户模型建（图谱归属仍按内容 user_id，借谁的模型都不串号）；backfill 用 `data/kg_backfill_done.json` 幂等防重复灌水、默认 `--dry-run`、只读 knowledge 写 kg 表**不碰 Milvus**（可在后端运行时跑）。
+- **节点判重归一化**（与 tech_term 同口径，忽略大小写/空格/连字符）：跨文档 `DI 容器`/`DI容器` 合一节点，重复出现 `mention_count` 累计；匹配得上 tech_term 的节点挂 `term_id`。归属沿用 0=全局/>0=个人，个人图谱仅本人可见。三元组端点若不在 entities 里也补建为节点（给端点留名额，总上限 `MAX_NODES_PER_DOC + MAX_TRIPLES_PER_DOC`）。
+- **两类边共存于 kg_edge，靠 `relation` 字段区分**（唯一约束 `(user_id,src,dst,relation)` 天然兼容）：
+  - **共现边** `relation="cooccur"`，**无向**（src<dst 存一份），同篇节点两两连边、每共同出现一篇 `weight+1`——供 BM25 查询扩展。
+  - **关系边** `relation=实际关系词`（如「上司」「依赖」，落库截断 `MAX_RELATION_LEN=32`），**有向**（src=主体 → dst=客体），同关系重复出现 `weight+1`——供多跳遍历。
+- **消费方一·检索查询扩展**：讲解模式消息命中术语卡时（`chain.build_ask` 的 `match_term`），`KgDAO.expansion_terms` 取该术语节点的强**共现**邻居（全局+本人锚点合并，按 weight 降序，最多 3 个），拼进 **BM25 查询**（`hybird.apply_expansion`，截断 100 字符）；**向量查询保持原问题**不稀释语义。编排检索路径每个变体同样受益。
+- **消费方二·多跳推理（v0.8.2 新增，A+B）**：`generation/multihop.py` 的 `MultiHopRetriever`，由 `chain.build_ask` 在 `settings.MULTIHOP` 开 + 有用户模型 + 启发式 `looks_multihop`（嵌套「的…的」/「of…of」/关系名词）命中时触发：
+  1. **LLM 拆解**问题 → 起始实体 + 跳数 + 关系词 + 每跳子查询；
+  2. **图谱遍历(B)** `KgDAO.traverse(uid, start, hops, relation)` 沿**有向关系边**走 N 跳拿答案路径（方向无关、防环、关系名互相包含容忍近义、跳数兜底 1..4），如 `王五 →(上司) 李四 →(上司) 张三`；
+  3. **逐跳检索取证(A)** 按路径相邻实体+关系词、LLM 子查询、原问题逐条检索，去重累计证据块（`MAX_EVIDENCE=8`，每跳 `PER_HOP_TOPK=3`）；
+  4. 拼装「推理路径（仅供参考）+ 各跳原文佐证（以此为准）」上下文交回 chain 生成。
+- **零风险降级**：共现扩展——没命中术语/图谱空/表未建/异常 → 扩展词为空，检索照常。多跳——启发式不像多跳/LLM 判非多跳/图谱空走不通/一条证据都检不到/任何异常 → `MultiHopRetriever.build` 返回 None，chain 退回单跳检索；图谱空时多跳仍可纯靠子查询检索（A 单独可用）。
 
 ---
 

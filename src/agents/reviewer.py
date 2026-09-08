@@ -44,7 +44,7 @@ class ReviewerAgent(BaseAgent):
             row = kb_dao.get_by_db(kid)
             if row is None or row.user_id != task.user_id:
                 continue  # 已删除/越权：跳过
-            verdict, reason, score, entities = self._review_row(row, llm)
+            verdict, reason, score, entities, triples = self._review_row(row, llm)
             if verdict == "discard":
                 self._discard(kb_dao, row)
                 discarded.append(kid)
@@ -57,12 +57,12 @@ class ReviewerAgent(BaseAgent):
                 # keep：写入质量分（LLM 失败时 score=None = 待补审）
                 kb_dao.update_quality(kid, score, reason)
                 kept.append(kid)
-                # 知识图谱建图：质检搭车抽到的实体建节点/共现边。
+                # 知识图谱建图：质检搭车抽到的实体建节点/共现边，三元组建有向关系边。
                 # 尽力而为——图谱任何故障都不影响质检结果
-                if score is not None and entities:
+                if score is not None and (entities or triples):
                     try:
                         kg_learned += KgDAO(db).learn_document(
-                            row.user_id, entities, row.category
+                            row.user_id, entities, row.category, triples
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("[reviewer] 图谱写入失败（跳过）：id=%s %s", kid, e)
@@ -104,28 +104,28 @@ class ReviewerAgent(BaseAgent):
 
     # ---------- 判定 ----------
 
-    def _review_row(self, row: KnowledgeModel, llm) -> tuple[str, str, float | None, list[str]]:
+    def _review_row(self, row: KnowledgeModel, llm) -> tuple[str, str, float | None, list[str], list[tuple[str, str, str]]]:
         """单条判定：规则层 → LLM 严格评分。
 
-        :return: (verdict, reason, score, entities)；LLM 失败时 score=None
-                （保留待补审，不误删）；entities 是评分搭车抽取的实体，
+        :return: (verdict, reason, score, entities, triples)；LLM 失败时 score=None
+                （保留待补审，不误删）；entities/triples 是评分搭车抽取的，
                 仅 LLM 评分成功时非空
         """
         # 1) 规则层：确信垃圾直接丢
         rule = rule_verdict(row.content)
         if rule is not None:
-            return "discard", rule[1], None, []
+            return "discard", rule[1], None, [], []
         # 2) 无模型：保守保留（待补审）
         if llm is None:
-            return "keep", "规则无法判定且无可用模型，保留待补审", None, []
+            return "keep", "规则无法判定且无可用模型，保留待补审", None, [], []
         # 3) LLM 打知识价值分，≥ 阈值才留
-        score, reason, entities = score_content(llm, row.title, row.category, row.content)
+        score, reason, entities, triples = score_content(llm, row.title, row.category, row.content)
         if score is None:
             # 评分失败：绝不误删，保留 + 记 llm_failed + 分数留 NULL（待补审）
-            return "keep", f"llm_failed：{reason}", None, []
+            return "keep", f"llm_failed：{reason}", None, [], []
         if score >= QUALITY_MIN_SCORE:
-            return "keep", reason, score, entities
-        return "discard", f"知识价值不足（{score:.0f} 分）：{reason}", score, entities
+            return "keep", reason, score, entities, triples
+        return "discard", f"知识价值不足（{score:.0f} 分）：{reason}", score, entities, triples
 
     @staticmethod
     def _discard(kb_dao: KnowledgeDAO, row: KnowledgeModel) -> None:

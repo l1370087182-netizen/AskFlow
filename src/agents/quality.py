@@ -53,7 +53,11 @@ QUALITY_PROMPT = """你是技术知识库的质量守门员。请为下面这段
 同时从正文提炼核心技术概念（entities，最多 8 个，简洁术语如 FastAPI/依赖注入，
 不要导航词/网站名/泛化词），供知识图谱建节点用。
 
-只输出 JSON：{{"score": 0到10的数字, "reason": "30字以内理由", "entities": ["..."]}}
+再抽取实体之间【正文明确陈述】的有向关系（relations，最多 6 条），每条格式
+[主体, 关系, 客体]，关系用简洁词（如 上司/属于/依赖/包含/用于/基于/位于/发起），
+只抽正文确实写明的关系、不要臆测或补全常识，供知识图谱建关系边、支持多跳推理。
+
+只输出 JSON：{{"score": 0到10的数字, "reason": "30字以内理由", "entities": ["..."], "relations": [["主体", "关系", "客体"]]}}
 
 标题：{title}
 分类：{category}
@@ -134,6 +138,11 @@ _ENTITY_NAME_MIN = 2
 _ENTITY_NAME_MAX = 40
 _ENTITIES_MAX = 8
 
+# 关系三元组上限与关系名长度界（关系词一般很短，如「上司」「依赖」）
+_RELATIONS_MAX = 6
+_RELATION_NAME_MIN = 1
+_RELATION_NAME_MAX = 16
+
 
 def parse_entities(raw: str) -> list[str]:
     """从模型输出宽容解析 entities 数组（剥围栏/截花括号），失败返回空。
@@ -170,11 +179,59 @@ def parse_entities(raw: str) -> list[str]:
     return []
 
 
-def score_content(llm, title: str, category: str, content: str, retries: int = 2) -> tuple[float | None, str, list[str]]:
-    """调 LLM 给内容打知识价值分（内置重试），搭车抽取实体。
+def parse_triples(raw: str) -> list[tuple[str, str, str]]:
+    """从模型输出宽容解析 relations 有向三元组 [主体, 关系, 客体]，失败返回空。
 
-    :return: (score, reason, entities)；评分失败返回 (None, 原因, [])。
-            entities 是顺手产出，评分失败时永远为空（不单独重试）。
+    与 parse_entities 同理：关系抽取是质检的搭车产出，独立函数、独立 try，
+    任何异常/格式不符都只意味着「这次没关系」，绝不连累评分与实体。
+    只接受恰好 3 个字符串元素的条目；主体/客体套实体名长度界，关系名套关系界。
+    """
+    try:
+        t = (raw or "").strip()
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+        candidates = [t]
+        start, end = t.find("{"), t.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(t[start : end + 1])
+        for c in candidates:
+            try:
+                data = json.loads(c)
+            except json.JSONDecodeError:
+                continue
+            items = data.get("relations") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                continue
+            out: list[tuple[str, str, str]] = []
+            seen: set[tuple[str, str, str]] = set()
+            for it in items:
+                if not isinstance(it, (list, tuple)) or len(it) != 3:
+                    continue
+                s, r, o = (str(x).strip() for x in it)
+                if not (_ENTITY_NAME_MIN <= len(s) <= _ENTITY_NAME_MAX):
+                    continue
+                if not (_ENTITY_NAME_MIN <= len(o) <= _ENTITY_NAME_MAX):
+                    continue
+                if not (_RELATION_NAME_MIN <= len(r) <= _RELATION_NAME_MAX):
+                    continue
+                key = (s.lower(), r.lower(), o.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((s, r, o))
+                if len(out) >= _RELATIONS_MAX:
+                    break
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def score_content(llm, title: str, category: str, content: str, retries: int = 2) -> tuple[float | None, str, list[str], list[tuple[str, str, str]]]:
+    """调 LLM 给内容打知识价值分（内置重试），搭车抽取实体与关系三元组。
+
+    :return: (score, reason, entities, triples)；评分失败返回 (None, 原因, [], [])。
+            entities / triples 是顺手产出，评分失败时永远为空（不单独重试）。
             调用方对 score=None 应保守保留。
     """
     prompt = build_quality_prompt(title, category, content)
@@ -185,12 +242,12 @@ def score_content(llm, title: str, category: str, content: str, retries: int = 2
             score = parse_score(raw)
             if score is not None:
                 reason = _extract_reason(raw)
-                return score, reason or "模型评分", parse_entities(raw)
+                return score, reason or "模型评分", parse_entities(raw), parse_triples(raw)
             last_err = "模型输出无法解析出分数"
         except Exception as e:  # noqa: BLE001 —— 重试
             last_err = str(e)
             logger.warning("[quality] 评分失败（第 %s/%s 次）：%s", attempt, retries, e)
-    return None, f"评分失败：{last_err}"[:200], []
+    return None, f"评分失败：{last_err}"[:200], [], []
 
 
 def _extract_reason(raw: str) -> str:
@@ -210,3 +267,50 @@ def _extract_reason(raw: str) -> str:
         except json.JSONDecodeError:
             continue
     return ""
+
+
+# 专门建图抽取的提示词：只要实体 + 关系，不做质量评判（用于豁免质检的内容）
+EXTRACT_GRAPH_PROMPT = """从下面的技术文档抽取知识图谱要素，供建图用（不做质量评判）。
+
+1. entities：核心技术概念（最多 8 个，简洁术语如 FastAPI/依赖注入，不要导航词/网站名/泛化词）
+2. relations：实体之间【正文明确陈述】的有向关系（最多 6 条），每条 [主体, 关系, 客体]，
+   关系用简洁词（如 上司/属于/依赖/包含/用于/基于/位于/发起），只抽正文确实写明的、不要臆测。
+
+只输出 JSON：{{"entities": ["..."], "relations": [["主体", "关系", "客体"]]}}
+
+标题：{title}
+分类：{category}
+正文（前{limit}字）：
+{content}"""
+
+
+def extract_graph(
+    llm, title: str, category: str, content: str, retries: int = 2
+) -> tuple[list[str], list[tuple[str, str, str]]]:
+    """专门抽取建图要素（实体 + 关系三元组），不做质量评分。
+
+    供两处用：① 向量化流水线给「豁免质检」的内容（手工/上传/全局爬虫）建图；
+    ② 存量补建脚本 backfill_kg.py。这些场景不需要质检分，故用独立精简提示词。
+    复用 parse_entities / parse_triples。失败返回 ([], [])，绝不抛异常阻断调用方
+    （建图是增强，不是主流程）。
+    """
+    prompt = EXTRACT_GRAPH_PROMPT.format(
+        title=title or "（无标题）",
+        category=category or "general",
+        limit=SCORE_CONTENT_LIMIT,
+        content=(content or "")[:SCORE_CONTENT_LIMIT],
+    )
+    last_err = ""
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.1)
+            ents = parse_entities(raw)
+            trips = parse_triples(raw)
+            if ents or trips:
+                return ents, trips
+            last_err = "未解析出实体/关系"
+        except Exception as e:  # noqa: BLE001 —— 重试
+            last_err = str(e)
+            logger.warning("[quality] 建图抽取失败（第 %s/%s 次）：%s", attempt, retries, e)
+    logger.info("[quality] 建图抽取无产出：%s", last_err)
+    return [], []

@@ -55,6 +55,21 @@ class Settings(BaseSettings):
         description="讲解模式编排检索开关：多查询改写+跨变体 RRF 融合；关闭则回退单次查询检索",
     )
 
+        # ---------- 多跳推理检索 ----------
+    MULTIHOP: bool = Field(
+        default=True,
+        description="讲解模式多跳推理开关：嵌套关系问题（如「X的上司的上司是谁」）"
+                    "先 LLM 拆解→图谱遍历导航→逐跳检索取证；图谱空/非多跳/异常均退回单跳检索",
+    )
+
+        # ---------- 入库建图 ----------
+    KG_BUILD_ON_INGEST: bool = Field(
+        default=True,
+        description="向量化流水线建图开关：给豁免质检的内容（手工/上传/全局爬虫）"
+                    "顺带抽实体+关系建图；个人爬取由 reviewer 质检搭车建图、流水线跳过避免重复。"
+                    "无可用模型（全局内容/未配置）时跳过，可由 backfill_kg.py 补建",
+    )
+
         # ---------- 联网搜索补爬（博查；SEARCH_API_KEY 留空 = 整体静默关闭） ----------
     SEARCH_PROVIDER: str = Field(default="bocha", description="搜索服务商（当前仅实现 bocha）")
     SEARCH_API_KEY: str = Field(default="", description="博查 API Key；留空则禁用联网搜索补爬")
