@@ -13,6 +13,7 @@ scripts/review_personal_kb.py 回补重评。
 import logging
 
 from DAO.agent_task_dao import AgentTaskDAO
+from DAO.kg_dao import KgDAO
 from DAO.knowledge_dao import KnowledgeDAO
 from agent_engine.base_agent import BaseAgent, TaskPermanentError  # noqa: F401
 from agents.quality import QUALITY_MIN_SCORE, rule_verdict, score_content
@@ -38,11 +39,12 @@ class ReviewerAgent(BaseAgent):
         llm = build_llm_for_user(db, task.user_id)  # 可为 None → 纯规则+保守保留
 
         kept, discarded, details = [], [], []
+        kg_learned = 0
         for kid in knowledge_ids[:50]:  # 单任务审核上限（补审脚本按 ≤50 分片）
             row = kb_dao.get_by_db(kid)
             if row is None or row.user_id != task.user_id:
                 continue  # 已删除/越权：跳过
-            verdict, reason, score = self._review_row(row, llm)
+            verdict, reason, score, entities = self._review_row(row, llm)
             if verdict == "discard":
                 self._discard(kb_dao, row)
                 discarded.append(kid)
@@ -55,6 +57,15 @@ class ReviewerAgent(BaseAgent):
                 # keep：写入质量分（LLM 失败时 score=None = 待补审）
                 kb_dao.update_quality(kid, score, reason)
                 kept.append(kid)
+                # 知识图谱建图：质检搭车抽到的实体建节点/共现边。
+                # 尽力而为——图谱任何故障都不影响质检结果
+                if score is not None and entities:
+                    try:
+                        kg_learned += KgDAO(db).learn_document(
+                            row.user_id, entities, row.category
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[reviewer] 图谱写入失败（跳过）：id=%s %s", kid, e)
                 if sum(1 for d in details if d["verdict"] == "keep") < 20:
                     details.append({
                         "knowledge_id": kid, "verdict": "keep",
@@ -65,6 +76,8 @@ class ReviewerAgent(BaseAgent):
         output = {"kept": len(kept), "discarded": len(discarded), "details": details}
         if backfill:
             output["backfill"] = True
+        if kg_learned:
+            output["kg_entities"] = kg_learned
         dao.write_back(
             task.id, self.agent_id, task.version,
             output=output,
@@ -72,6 +85,7 @@ class ReviewerAgent(BaseAgent):
             log_desc=(
                 f"{'存量补审' if backfill else '质检'}完成："
                 f"保留 {len(kept)} / 丢弃 {len(discarded)}"
+                + (f" / 图谱实体 {kg_learned}" if kg_learned else "")
             ),
         )
         if kept:
@@ -90,26 +104,28 @@ class ReviewerAgent(BaseAgent):
 
     # ---------- 判定 ----------
 
-    def _review_row(self, row: KnowledgeModel, llm) -> tuple[str, str, float | None]:
+    def _review_row(self, row: KnowledgeModel, llm) -> tuple[str, str, float | None, list[str]]:
         """单条判定：规则层 → LLM 严格评分。
 
-        :return: (verdict, reason, score)；LLM 失败时 score=None（保留待补审，不误删）
+        :return: (verdict, reason, score, entities)；LLM 失败时 score=None
+                （保留待补审，不误删）；entities 是评分搭车抽取的实体，
+                仅 LLM 评分成功时非空
         """
         # 1) 规则层：确信垃圾直接丢
         rule = rule_verdict(row.content)
         if rule is not None:
-            return "discard", rule[1], None
+            return "discard", rule[1], None, []
         # 2) 无模型：保守保留（待补审）
         if llm is None:
-            return "keep", "规则无法判定且无可用模型，保留待补审", None
+            return "keep", "规则无法判定且无可用模型，保留待补审", None, []
         # 3) LLM 打知识价值分，≥ 阈值才留
-        score, reason = score_content(llm, row.title, row.category, row.content)
+        score, reason, entities = score_content(llm, row.title, row.category, row.content)
         if score is None:
             # 评分失败：绝不误删，保留 + 记 llm_failed + 分数留 NULL（待补审）
-            return "keep", f"llm_failed：{reason}", None
+            return "keep", f"llm_failed：{reason}", None, []
         if score >= QUALITY_MIN_SCORE:
-            return "keep", reason, score
-        return "discard", f"知识价值不足（{score:.0f} 分）：{reason}", score
+            return "keep", reason, score, entities
+        return "discard", f"知识价值不足（{score:.0f} 分）：{reason}", score, entities
 
     @staticmethod
     def _discard(kb_dao: KnowledgeDAO, row: KnowledgeModel) -> None:

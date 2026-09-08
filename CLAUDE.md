@@ -4,6 +4,7 @@
 > 架构来源：飞书文档《RAG 项目架构》（本地权威副本：`.cursor/rules/rag-feishu-architecture.mdc`）
 > 协作约定：助手可直接读写仓库代码（v0.3 起取消「代码全部手写」限制），改动需与本文档的架构和目录约定保持一致，关键决策做简要说明。
 > v0.8 新增：用户鉴权（邮箱验证码注册/登录/忘记密码）+ 全部用户数据按账号隔离（对话/评估/面试/模型配置），见「阶段 11」。
+> v0.8.1 新增：轻量知识图谱——质检 LLM 调用搭车抽实体建图（kg_node/kg_edge），讲解模式命中术语卡时用图谱强邻居做 BM25 查询扩展，见 §7.9。
 
 ---
 
@@ -107,6 +108,7 @@ project/
     │   ├── evaluate_dao.py
     │   ├── tech_term_dao.py
     │   ├── user_dao.py             # 用户账号/改密/私有模型配置 ✅
+    │   ├── kg_dao.py               # 知识图谱：实体节点/共现边写入 + 邻居查询扩展 ✅
     │   └── notification_dao.py     # 站内通知（列表/已读/删除/裁旧，每用户留 200）✅
     ├── database/            # engine、sessionmaker、Base、get_db
     │   └── session.py
@@ -117,7 +119,8 @@ project/
     │   ├── EvaluateModel.py        # +user_id（阶段11）
     │   ├── TechTermModel.py
     │   ├── UserModel.py            # 用户账号+私有模型配置 ✅（阶段11）
-    │   └── NotificationModel.py    # 站内通知表 ✅（阶段13）
+    │   ├── NotificationModel.py    # 站内通知表 ✅（阶段13）
+    │   └── KgModel.py              # 知识图谱 kg_node/kg_edge ✅（§7.9）
     ├── schema/              # Pydantic DTO
     │   ├── knowledge.py ✅
     │   ├── jd.py
@@ -208,6 +211,7 @@ project/
 - **user（用户账号，阶段 11）**：`email`（唯一，登录名）、`password_hash`（pbkdf2_sha256）、`nickname`、`token_ver`（改密 +1 使旧 JWT 失效）、`llm_provider` / `llm_base_url` / `llm_api_key_enc`（Fernet 密文）/ `llm_model`（用户私有模型配置，空=未配置，功能入口会给弹窗/400 引导）、`created_at` / `updated_at`。
 - **jd 表（阶段 11 补 `user_id` 列）**：同 evaluate，按用户隔离，存量行留 NULL 作废。
 - **notification（站内通知，阶段 13）**：`user_id`、`type`（task_done/task_failed/evaluation/interview）、`title` / `body` / `link`（前端深链接）、`ref_id`（关联任务/会话/记录，删目标时按它清通知）、`is_read`、`created_at`。写入挂钩在 `agent_task_dao.write_back/fail_task` 尾部（CAS 保证每终态恰触发一次）+ 费曼评分/面试总评落库点；通知用**独立 Session** 写入（防污染任务会话）；每用户保留最近 200 条。
+- **kg_node / kg_edge（知识图谱，§7.9）**：实体节点表（`user_id` 归属 0=全局/>0=个人、`name`、`category`、`term_id` 关联 tech_term、`mention_count`）+ 共现边表（`src_id`/`dst_id` 无向存一份 src<dst、`relation`（当前仅 cooccur）、`weight` 共现次数）。节点 (user_id,name) 唯一、边 (user_id,src,dst,relation) 唯一，均由 init_db `create_all` 建表。
 
 ---
 
@@ -391,6 +395,17 @@ query ──┬── BM25（jieba分词 + rank_bm25，top 20）──┐
 - **落库字段** `knowledge.quality_score / quality_reason`（可空，init_db 幂等补列）：`NULL` = 未评/待补审（手工/上传恒豁免）。调阈值无需重跑 LLM。
 - **范围**：门禁只管**爬取**内容；手工添加/上传豁免（用户对自己的内容负责）。
 - **存量清理** `scripts/review_personal_kb.py --user <id>`：默认 `--dry-run` 采样评分供校准，`--apply` 分片（≤50）建补审质检任务；只碰 `user_id>0` 且排除 `manual://`；`--max-rows` 熔断。
+
+### 7.9 轻量知识图谱（实体 + 共现边，v0.8.1 新增）
+
+图谱当**组织层/增强层**而非独立检索层：不引入新存储组件（两张 MySQL 表），建图零额外 LLM 成本（搭车），检索侧纯增量可降级。
+
+- **建图搭车在质检评分上**：`agents/quality.py` 的 `QUALITY_PROMPT` 在打分的同时要求输出 `entities`（≤8 个核心技术概念），`score_content` 返回三元组 `(score, reason, entities)`——一次 LLM 调用两份产出，不增加成本。实体解析独立于评分解析（`parse_entities`），解析失败只意味「这次没实体」，绝不连累评分去留。
+- **reviewer 落图**：keep 且有实体时调 `KgDAO.learn_document` 建节点/共现边（尽力而为，try 包裹，图谱故障不影响质检结果）；写回 output 带 `kg_entities` 计数。丢弃的知识不建图。
+- **节点判重归一化**（与 tech_term 同口径，忽略大小写/空格/连字符）：跨文档 `DI 容器`/`DI容器` 合一节点，重复出现 `mention_count` 累计；匹配得上 tech_term 的节点挂 `term_id`。归属沿用 0=全局/>0=个人，个人图谱仅本人可见。
+- **边 = 同篇共现**：单篇实体两两连边（src<dst 存一份），每共同出现一篇 `weight+1`；单篇实体上限 8（`MAX_NODES_PER_DOC`）。
+- **检索查询扩展（当前唯一消费方）**：讲解模式消息命中术语卡时（`chain.build_ask` 的 `match_term`），`KgDAO.expansion_terms` 取该术语节点的强共现邻居（全局+本人锚点合并，按 weight 降序，最多 3 个），拼进 **BM25 查询**（`hybird.apply_expansion`，截断 100 字符）——专治「口语化问法与文档零词面重合」；**向量查询保持原问题**不稀释语义。编排检索路径每个变体同样受益。
+- **零风险降级**：没命中术语/图谱为空/表未建/任何异常 → 扩展词为空，检索照常按原问题执行。
 
 ---
 

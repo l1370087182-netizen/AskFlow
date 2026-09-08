@@ -17,7 +17,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from core.config import settings
-from milvus.retrieval.hybird import rrf_fuse
+from milvus.retrieval.hybird import apply_expansion, rrf_fuse
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,12 @@ class RetrievalOrchestrator:
         top_k: int = 5,
         category: str | None = None,
         uid: int = 0,
+        expand: list[str] | None = None,
     ) -> list[dict]:
-        """编排检索；任何异常都回退为普通单查询检索（不抛给对话层）"""
+        """编排检索；任何异常都回退为普通单查询检索（不抛给对话层）
+
+        :param expand: 知识图谱查询扩展词，每个变体的 BM25 查询都会拼上
+        """
         try:
             variants = self._rewrite(query)
         except Exception as e:  # noqa: BLE001 —— 改写失败：原查询单飞
@@ -87,17 +91,17 @@ class RetrievalOrchestrator:
         queries = queries[: 1 + MAX_VARIANTS]
         if len(queries) == 1:
             return self.retriever.search(
-                query, top_k=top_k, category=category, uid=uid
+                query, top_k=top_k, category=category, uid=uid, expand=expand
             )
 
         import time
         t0 = time.time()
         try:
-            return self._multi_search(queries, top_k, category, uid, t0)
+            return self._multi_search(queries, top_k, category, uid, t0, expand)
         except Exception as e:  # noqa: BLE001 —— 多路失败：回退单查询
             logger.warning("[orchestrator] 多查询检索失败，回退单查询：%s", e)
             return self.retriever.search(
-                query, top_k=top_k, category=category, uid=uid
+                query, top_k=top_k, category=category, uid=uid, expand=expand
             )
 
     def _rewrite(self, query: str) -> list[str]:
@@ -118,6 +122,7 @@ class RetrievalOrchestrator:
         category: str | None,
         uid: int,
         t0: float,
+        expand: list[str] | None = None,
     ) -> list[dict]:
         """每个变体跑双路召回 → 全部进同一 RRF 融合 → 一次 Rerank"""
         import time
@@ -128,7 +133,10 @@ class RetrievalOrchestrator:
             if time.time() - t0 > ORCHESTRATE_BUDGET_SEC:
                 break  # 预算内能跑几路跑几路
             bm25_hits = r.bm25.search(
-                q, top_k=r.bm25_top, category=category, uid=uid
+                apply_expansion(q, expand),
+                top_k=r.bm25_top,
+                category=category,
+                uid=uid,
             )
             try:
                 vec_hits = r.vector.search(

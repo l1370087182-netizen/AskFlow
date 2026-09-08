@@ -5,6 +5,8 @@
 费曼模式：只在选题时检索一次，结果作为「参考答案」藏进系统提示，不直接展示。
 术语兜底：tech_term（卡片数据源）与 knowledge 语料是两条独立链路，术语常常
 「卡片里有、语料里没有」——消息里命中术语时，把术语卡片一并拼进上下文。
+图谱扩展（§7.9）：命中的术语若在知识图谱里有强共现邻居，把邻居实体拼进
+BM25 查询做扩展（只扩 BM25，向量查询保持原问题）；图谱为空/异常时零影响。
 """
 from __future__ import annotations
 
@@ -92,6 +94,22 @@ class ChainBuilder:
         term = self.match_term(message, uid)
         return format_term_card(term) if term else ""
 
+    def kg_expansion(self, term, uid: int = 0) -> list[str]:
+        """命中术语 → 图谱强邻居实体名（BM25 查询扩展词）。
+
+        图谱是渐进增强：查不到节点/边、表还没建、任何异常都返回空，
+        检索照常按原问题执行。
+        """
+        if term is None:
+            return []
+        try:
+            from DAO.kg_dao import KgDAO  # 延迟导入，与 user_dao 同理
+
+            return KgDAO(self.db).expansion_terms(uid, term)
+        except Exception as e:  # noqa: BLE001 —— 扩展是增强，绝不阻断检索
+            logger.warning("[chain] 图谱查询扩展失败（返回空）：%s", e)
+            return []
+
     # ---------- 讲解模式 ----------
 
     def build_ask(
@@ -110,10 +128,14 @@ class ChainBuilder:
         :return: (messages, 检索结果) —— 检索结果另外用于前端展示引用来源；
                 已经相关度阈值过滤（hybird.relevant_hits），空列表即「知识库无资料」
         """
-        results = relevant_hits(self._search_ask(message, top_k, uid, llm))
+        # 术语兜底 + 图谱扩展：命中术语卡片时，顺带取图谱邻居实体扩进 BM25
+        # 查询（一次 match_term 两个用途）；没命中/图谱为空 → 检索原样进行
+        term = self.match_term(message, uid)
+        term_card = format_term_card(term) if term else ""
+        results = relevant_hits(
+            self._search_ask(message, top_k, uid, llm, self.kg_expansion(term, uid))
+        )
         context = format_context(results)
-        # 术语兜底：卡片里有、语料里没有的知识，用术语卡片垫上
-        term_card = self.term_context(message, uid)
         if term_card:
             context += "\n\n" + term_card
         system = ASK_SYSTEM_PROMPT.format(context=context)
@@ -124,18 +146,21 @@ class ChainBuilder:
         )
         return messages, results
 
-    def _search_ask(self, message: str, top_k: int, uid: int, llm) -> list[dict]:
-        """讲解模式检索：编排开关开启且有 llm 时走编排器，否则普通检索"""
+    def _search_ask(self, message: str, top_k: int, uid: int, llm, expand: list[str] | None = None) -> list[dict]:
+        """讲解模式检索：编排开关开启且有 llm 时走编排器，否则普通检索
+
+        :param expand: 图谱查询扩展词（可能为空列表），只影响 BM25 路
+        """
         if llm is not None and settings.RETRIEVAL_ORCHESTRATOR:
             try:
                 from generation.retrieval_orchestrator import RetrievalOrchestrator
 
                 return RetrievalOrchestrator(self.retriever, llm).search(
-                    message, top_k=top_k, uid=uid
+                    message, top_k=top_k, uid=uid, expand=expand
                 )
             except Exception as e:  # noqa: BLE001 —— 编排异常回退普通检索
                 logger.warning("[chain] 编排检索异常，回退普通检索：%s", e)
-        return self.retriever.search(message, top_k=top_k, uid=uid)
+        return self.retriever.search(message, top_k=top_k, uid=uid, expand=expand)
 
     # ---------- 费曼模式 ----------
 

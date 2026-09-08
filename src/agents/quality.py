@@ -50,7 +50,10 @@ QUALITY_PROMPT = """你是技术知识库的质量守门员。请为下面这段
 
 有实质技术内容（概念解释/原理/用法/代码示例/API 文档/教程）应打高分。
 
-只输出 JSON：{{"score": 0到10的数字, "reason": "30字以内理由"}}
+同时从正文提炼核心技术概念（entities，最多 8 个，简洁术语如 FastAPI/依赖注入，
+不要导航词/网站名/泛化词），供知识图谱建节点用。
+
+只输出 JSON：{{"score": 0到10的数字, "reason": "30字以内理由", "entities": ["..."]}}
 
 标题：{title}
 分类：{category}
@@ -126,10 +129,53 @@ def _clamp(v: float) -> float:
     return max(0.0, min(10.0, v))
 
 
-def score_content(llm, title: str, category: str, content: str, retries: int = 2) -> tuple[float | None, str]:
-    """调 LLM 给内容打知识价值分（内置重试）。
+# 实体名长度上下界（与 DAO/kg_dao.py 口径一致）
+_ENTITY_NAME_MIN = 2
+_ENTITY_NAME_MAX = 40
+_ENTITIES_MAX = 8
 
-    :return: (score, reason)；失败返回 (None, 原因)。调用方对 None 应保守保留。
+
+def parse_entities(raw: str) -> list[str]:
+    """从模型输出宽容解析 entities 数组（剥围栏/截花括号），失败返回空。
+
+    实体抽取是质检的搭车产出，解析失败绝不能连累评分——所以独立函数、
+    独立 try，任何异常都只意味着「这次没有实体」。
+    """
+    try:
+        t = (raw or "").strip()
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+        candidates = [t]
+        start, end = t.find("{"), t.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(t[start : end + 1])
+        for c in candidates:
+            try:
+                data = json.loads(c)
+            except json.JSONDecodeError:
+                continue
+            items = data.get("entities") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                continue
+            out: list[str] = []
+            for it in items:
+                name = str(it).strip()
+                if _ENTITY_NAME_MIN <= len(name) <= _ENTITY_NAME_MAX and name not in out:
+                    out.append(name)
+                if len(out) >= _ENTITIES_MAX:
+                    break
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def score_content(llm, title: str, category: str, content: str, retries: int = 2) -> tuple[float | None, str, list[str]]:
+    """调 LLM 给内容打知识价值分（内置重试），搭车抽取实体。
+
+    :return: (score, reason, entities)；评分失败返回 (None, 原因, [])。
+            entities 是顺手产出，评分失败时永远为空（不单独重试）。
+            调用方对 score=None 应保守保留。
     """
     prompt = build_quality_prompt(title, category, content)
     last_err = ""
@@ -139,12 +185,12 @@ def score_content(llm, title: str, category: str, content: str, retries: int = 2
             score = parse_score(raw)
             if score is not None:
                 reason = _extract_reason(raw)
-                return score, reason or "模型评分"
+                return score, reason or "模型评分", parse_entities(raw)
             last_err = "模型输出无法解析出分数"
         except Exception as e:  # noqa: BLE001 —— 重试
             last_err = str(e)
             logger.warning("[quality] 评分失败（第 %s/%s 次）：%s", attempt, retries, e)
-    return None, f"评分失败：{last_err}"[:200]
+    return None, f"评分失败：{last_err}"[:200], []
 
 
 def _extract_reason(raw: str) -> str:

@@ -48,6 +48,24 @@ def relevant_hits(hits: list[dict], min_score: float = RELEVANCE_MIN_SCORE) -> l
     return out
 
 
+# 知识图谱查询扩展词拼进 BM25 查询的长度上限（防超长拖慢分词）
+EXPANSION_MAX_CHARS = 100
+
+
+def apply_expansion(query: str, expand: list[str] | None) -> str:
+    """把图谱邻居实体拼进查询（仅 BM25 用；向量查询保持原问题，防稀释语义）。
+
+    扩展词来自 kg 邻居（强共现实体），帮 BM25 捞到「问法与文档零词面重合」
+    的命中；没有任何扩展词时原样返回。
+    """
+    if not expand:
+        return query
+    extra = " ".join(str(e).strip() for e in expand if str(e).strip())
+    if not extra:
+        return query
+    return f"{query} {extra[:EXPANSION_MAX_CHARS]}"
+
+
 def chunk_key(doc: dict) -> tuple:
     """块的跨检索器身份标识：(knowledge_id, 内容 md5)。
 
@@ -109,15 +127,21 @@ class HybridRetriever:
         top_k: int = 5,
         category: str | None = None,
         uid: int = 0,
+        expand: list[str] | None = None,
     ) -> list[dict]:
         """完整检索链路，返回精排后的最终结果
 
         :param uid: 请求者用户；个人知识仅本人可检索（全局块所有人可见）
+        :param expand: 知识图谱查询扩展词（邻居实体，见 kg_dao.expansion_terms），
+                只拼进 BM25 查询；向量路仍用原问题
         :return: [{knowledge_id, content, category, score, rrf_score, matched_by, source}, ...]
         """
         # 1) 双路召回（向量路不可用时降级为单路，不让整个对话挂掉）
         bm25_hits = self.bm25.search(
-            query, top_k=self.bm25_top, category=category, uid=uid
+            apply_expansion(query, expand),
+            top_k=self.bm25_top,
+            category=category,
+            uid=uid,
         )
         vec_hits: list[dict] = []
         if self.vector is not None:

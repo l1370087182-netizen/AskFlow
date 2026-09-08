@@ -60,7 +60,7 @@ def dry_run(db, llm, user_id: int) -> None:
     scores = []
     below = 0
     for row in rows:
-        score, reason = score_content(llm, row.title, row.category, row.content)
+        score, reason, _ = score_content(llm, row.title, row.category, row.content)
         if score is None:
             print(f"  [评分失败] id={row.id} 《{row.title[:30]}》 {reason}")
             continue
