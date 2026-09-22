@@ -17,7 +17,7 @@ from DAO.agent_task_dao import AgentTaskDAO
 from database.session import get_db
 from model.AgentTaskModel import AgentTaskModel, TaskKind, TaskStatus
 from model.InterviewRecordModel import InterviewRecordModel
-from model.ProgressState import ProgressStatus, view_status
+from model.ProgressState import ACTIVE, ProgressStatus, view_status
 from model.UserModel import UserModel
 from service.knowledge_service import (
     HEARTBEAT_TIMEOUT_SEC,
@@ -49,7 +49,7 @@ def _item_view(t: AgentTaskModel, crawl_progress: dict | None = None) -> dict:
     out = t.output or {}
     payload = t.payload or {}
     # 爬取链路仍活跃（检索中/排队/爬取中）才算等待——结束后子题即恢复可认领
-    chain_active = bool(crawl_progress) and crawl_progress.get("status") in ProgressStatus.ACTIVE
+    chain_active = bool(crawl_progress) and crawl_progress.get("status") in ACTIVE
     return {
         "task_id": t.id,
         "topic": payload.get("topic", ""),
