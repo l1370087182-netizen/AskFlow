@@ -10,6 +10,7 @@
 import logging
 
 from database.session import SessionLocal
+from model.AgentTaskModel import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def notify_task_terminal(snap: dict) -> None:
     """
     try:
         status = snap.get("status")
-        if status not in ("completed", "failed"):
+        if status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
             return
         uid = int(snap.get("user_id") or 0)
         if uid == 0:
@@ -60,7 +61,7 @@ def notify_task_terminal(snap: dict) -> None:
         output = snap.get("output") or {}
         task_id = str(snap.get("id", ""))
 
-        if status == "failed":
+        if status == TaskStatus.FAILED:
             title, body, link = _failed_text(kind, snap.get("assignee", ""), output)
             _insert(uid, "task_failed", title, body, link, task_id)
             return

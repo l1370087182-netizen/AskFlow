@@ -18,6 +18,7 @@ from agents.quality import rule_verdict
 from generation.llm import build_llm_for_user
 from model.AgentTaskModel import TaskKind, TaskStatus
 from model.KnowledgeModel import KnowledgeModel
+from model.ProgressState import ProgressStatus
 from DAO.knowledge_dao import KnowledgeDAO
 from milvus.ingestion.pipeline import IngestionPipeline
 from service.knowledge_service import (
@@ -63,13 +64,13 @@ class ProducerAgent(BaseAgent):
         llm = build_llm_for_user(db, task.user_id)
         if llm is None:
             self._save_state(r, task, {
-                "status": "failed",
+                "status": ProgressStatus.FAILED,
                 "error": "未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型后再爬取",
             })
             raise TaskPermanentError("未配置个人大模型")
 
         # 2) 进度态开局：重试续跑也重置（重新从种子页爬，旧页结果不沿用）
-        state = self._save_state(r, task, {"status": "running", "pages": []})
+        state = self._save_state(r, task, {"status": ProgressStatus.RUNNING, "pages": []})
 
         # 3) 逐页：抓取 → 校验 → AI 清洗 → upsert → 即时向量化
         crawler = ShallowCrawler(max_pages=max_pages)
@@ -151,7 +152,7 @@ class ProducerAgent(BaseAgent):
                 })
                 _try_save(r, state)
         except Exception as e:  # noqa: BLE001 —— 意外异常：进度态置失败后抛出走引擎重试
-            state["status"] = "failed"
+            state["status"] = ProgressStatus.FAILED
             state["error"] = f"任务执行异常：{e}"
             _try_save(r, state)
             raise
@@ -160,13 +161,13 @@ class ProducerAgent(BaseAgent):
         #    无失败但全被质量门禁拦截=done（宁缺毋滥属正常，不报 failed 吓用户）；
         #    其余颗粒无收=failed
         if state["done_pages"] > 0 and state["failed_pages"] == 0:
-            state["status"] = "done"
+            state["status"] = ProgressStatus.DONE
         elif state["done_pages"] > 0:
-            state["status"] = "partial"
+            state["status"] = ProgressStatus.PARTIAL
         elif state["failed_pages"] == 0 and state["skipped_pages"] > 0:
-            state["status"] = "done"
+            state["status"] = ProgressStatus.DONE
         else:
-            state["status"] = "failed"
+            state["status"] = ProgressStatus.FAILED
             first_err = next((p["error"] for p in state["pages"] if p.get("error")), "")
             state["error"] = first_err or "未能爬到任何有效页面"
         state["finished_at"] = time.time()
@@ -189,7 +190,7 @@ class ProducerAgent(BaseAgent):
             f"成功 {state['done_pages']} / 失败 {state['failed_pages']}"
             f" / 跳过 {state['skipped_pages']}"
         )
-        if state["status"] == "failed":
+        if state["status"] == ProgressStatus.FAILED:
             wrote = dao.write_back(
                 task.id, self.agent_id, task.version,
                 status=TaskStatus.FAILED,
@@ -211,7 +212,7 @@ class ProducerAgent(BaseAgent):
             )
             return
         # 接力：写回成功且有入库条目 → 发质检子任务（审核与生产分离）
-        if state["status"] != "failed":
+        if state["status"] != ProgressStatus.FAILED:
             if knowledge_ids:
                 dao.create(
                     kind=TaskKind.QUALITY_REVIEW,
@@ -232,10 +233,10 @@ class ProducerAgent(BaseAgent):
         """
         row = dao.get(task.id)
         if row is not None and row.status == TaskStatus.CANCELED:
-            state["status"] = "canceled"
+            state["status"] = ProgressStatus.CANCELED
             state["error"] = ""
         else:
-            state["status"] = "failed"
+            state["status"] = ProgressStatus.FAILED
             state["error"] = "任务被系统中断（超时回收或状态变更），本次执行终止"
         state["finished_at"] = time.time()
         _try_save(r, state)
@@ -254,7 +255,7 @@ class ProducerAgent(BaseAgent):
             "url": payload.get("url", "") or (payload.get("urls") or [""])[0],
             "category": payload.get("category", "general"),
             "max_pages": int(payload.get("max_pages", 10)),
-            "status": "pending",
+            "status": ProgressStatus.PENDING,
             "topic": payload.get("topic", ""),
             "phase": "",
             "done_pages": 0,

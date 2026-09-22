@@ -21,6 +21,7 @@ from core.config import settings
 from milvus.ingestion.pipeline import IngestionPipeline
 from milvus.ingestion.VectorStore import get_vector_store
 from model.KnowledgeModel import KnowledgeModel
+from model.ProgressState import ProgressStatus
 from model.UserModel import UserModel
 from schema.knowledge import (
     KnowledgeItem,
@@ -148,7 +149,7 @@ def my_crawl_submit(
             status_code=e.status_code,
             detail={"message": e.message, "task_id": e.task_id},
         ) from e
-    return {"task_id": task_id, "status": "pending"}
+    return {"task_id": task_id, "status": ProgressStatus.PENDING}
 
 
 @router.get("/my/crawl/active", response_model=CrawlActiveOut)

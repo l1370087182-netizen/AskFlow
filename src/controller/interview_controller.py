@@ -25,7 +25,7 @@ from DAO.tech_term_dao import TechTermDAO
 from database.session import SessionLocal, get_db
 from generation.llm import ChatLLM, build_llm_for_user
 from interview.analyzer import InterviewAnalyzer, extract_weaknesses
-from model.AgentTaskModel import TaskKind
+from model.AgentTaskModel import TaskKind, TaskStatus
 from model.InterviewRecordModel import InterviewRecordModel
 from interview.prompts import (
     FINAL_ASSESS_PROMPT,
@@ -389,7 +389,7 @@ def request_plan(
     # 复用已有未完成的计划任务（幂等，防重复点击）
     if rec.plan_task_id:
         existing = dao.get(rec.plan_task_id)
-        if existing and existing.status in ("pending", "in_progress"):
+        if existing and existing.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
             return {"task_id": existing.id, "status": existing.status, "reused": True}
 
     task = dao.create(
@@ -400,7 +400,7 @@ def request_plan(
     )
     rec.plan_task_id = task.id
     db.commit()
-    return {"task_id": task.id, "status": "pending", "reused": False}
+    return {"task_id": task.id, "status": TaskStatus.PENDING, "reused": False}
 
 
 @router.get("/records/{record_id}/plan")

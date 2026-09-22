@@ -33,6 +33,7 @@ from generation.prompts import AI_ADD_SYSTEM_PROMPT, CLEAN_SYSTEM_PROMPT
 from milvus.ingestion.pipeline import IngestionPipeline
 from model.AgentTaskModel import TaskKind, TaskStatus
 from model.KnowledgeModel import KnowledgeModel
+from model.ProgressState import ProgressStatus, view_status
 from util.redis_util import make_redis
 
 logger = logging.getLogger(__name__)
@@ -279,7 +280,7 @@ def submit_crawl(
             "url": display_url,
             "category": category or "general",
             "max_pages": final_pages,
-            "status": "pending",
+            "status": ProgressStatus.PENDING,
             "topic": topic,
             "phase": "",
             "done_pages": 0,
@@ -317,7 +318,7 @@ def _synth_state(row) -> dict:
         "url": p.get("url", "") or (p.get("urls") or [""])[0],
         "category": p.get("category", "general"),
         "max_pages": int(p.get("max_pages", 0) or 0),
-        "status": "searching" if is_search else "pending",
+        "status": ProgressStatus.SEARCHING if is_search else ProgressStatus.PENDING,
         "phase": "联网搜索补充" if is_search else "",
         "topic": p.get("topic", ""),
         "done_pages": 0,
@@ -331,48 +332,6 @@ def _synth_state(row) -> dict:
         "finished_at": 0.0,
         "child_task_id": "",
     }
-
-
-_DB_TERMINAL = {
-    TaskStatus.COMPLETED: "done",
-    TaskStatus.FAILED: "failed",
-    TaskStatus.CANCELED: "canceled",
-}
-
-
-def _view_by_db(row, state: dict) -> dict:
-    """用 DB 生命周期状态校准进度视图（DB 优先，防执行端崩溃/取消后视图失真）：
-
-    ① DB canceled → canceled（合并 Redis 已有进度）；
-    ② DB 终态而视图非终态 → 以 DB 覆盖（防 searcher/producer 崩溃后前端永远
-       显示 running/searching）；
-    ③ DB 活跃 → 状态以 DB 为准（pending 就是排队；悬挂判定只对 in_progress 做，
-       pending 由 reaper 兜底，不误判失败）。
-    """
-    db_status = row.status
-    if db_status == TaskStatus.CANCELED:
-        state["status"] = "canceled"
-        if not state.get("finished_at"):
-            state["finished_at"] = time.time()
-        return state
-    if db_status in _DB_TERMINAL:
-        if state["status"] not in ("done", "partial", "failed", "canceled"):
-            state["status"] = _DB_TERMINAL[db_status]
-            if db_status == TaskStatus.FAILED and not state.get("error"):
-                state["error"] = (row.output or {}).get("error", "") or "任务执行失败"
-        return state
-    # DB 活跃：生命周期以 DB 为准
-    if db_status == TaskStatus.PENDING:
-        state["status"] = "pending"  # 排队（含回收待重跑）
-    else:
-        if state["status"] not in ("running", "searching"):
-            state["status"] = (
-                "searching" if row.kind == TaskKind.WEB_SEARCH else "running"
-            )
-        if time.time() - state.get("heartbeat", 0) > HEARTBEAT_TIMEOUT_SEC:
-            state["status"] = "failed"
-            state["error"] = state.get("error") or "任务超时（工作线程心跳丢失），已标记失败"
-    return state
 
 
 def get_crawl_task(db, uid: int, task_id: str) -> dict | None:
@@ -400,7 +359,7 @@ def get_crawl_task(db, uid: int, task_id: str) -> dict | None:
 
     child = dao.find_child(task_id, TaskKind.CRAWL)  # WEB_SEARCH → 子爬取反查
     state["child_task_id"] = child.id if child else ""
-    return _view_by_db(row, state)
+    return view_status(row, state, HEARTBEAT_TIMEOUT_SEC)
 
 
 def get_active_crawl_tasks(db, uid: int) -> list[dict]:
@@ -439,7 +398,7 @@ def get_active_crawl_tasks(db, uid: int) -> list[dict]:
             state = _synth_state(row)
         child = dao.find_child(row.id, TaskKind.CRAWL)
         state["child_task_id"] = child.id if child else ""
-        out.append(_view_by_db(row, state))
+        out.append(view_status(row, state, HEARTBEAT_TIMEOUT_SEC))
     return out
 
 

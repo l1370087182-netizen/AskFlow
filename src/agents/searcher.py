@@ -18,6 +18,7 @@ from DAO.agent_task_dao import AgentTaskDAO
 from agent_engine.base_agent import BaseAgent, TaskPermanentError
 from generation.llm import build_llm_for_user
 from model.AgentTaskModel import TaskKind, TaskStatus
+from model.ProgressState import ProgressStatus
 from search.web_search import WebSearchError, filter_candidates, generate_queries, search_web
 from service.knowledge_service import (
     _redis,
@@ -54,7 +55,7 @@ class SearcherAgent(BaseAgent):
         llm = build_llm_for_user(db, task.user_id)
         if llm is None:
             self._save_state(r, task, {
-                "status": "failed",
+                "status": ProgressStatus.FAILED,
                 "error": "未配置个人大模型，请先到「对话学习」页 ⚙️ 配置模型",
             })
             raise TaskPermanentError("未配置个人大模型")
@@ -63,7 +64,7 @@ class SearcherAgent(BaseAgent):
         goal = str(payload.get("goal", "")).strip()
 
         # 2) 进度态开局：searching（前端不定长动画条）
-        state = self._save_state(r, task, {"status": "searching", "phase": "生成检索词"})
+        state = self._save_state(r, task, {"status": ProgressStatus.SEARCHING, "phase": "生成检索词"})
         self._note(f"生成检索词：{topic[:30]}")
 
         # 3) 搜索 + 选页（每阶段间心跳：防 reaper 误回收 + 取消探针）
@@ -98,7 +99,7 @@ class SearcherAgent(BaseAgent):
             _try_save(r, state)
             selected = filter_candidates(llm, db, task.user_id, topic, candidates, goal=goal)
         except Exception as e:  # noqa: BLE001 —— 意外异常：进度态置失败后走引擎重试
-            state["status"] = "failed"
+            state["status"] = ProgressStatus.FAILED
             state["error"] = f"检索执行异常：{e}"
             state["finished_at"] = time.time()
             _try_save(r, state)
@@ -116,7 +117,7 @@ class SearcherAgent(BaseAgent):
                 log_action="complete",
                 log_desc=f"联网检索完成：{len(candidates)} 个候选均不值得爬取",
             )
-            state["status"] = "done"
+            state["status"] = ProgressStatus.DONE
             state["phase"] = ""
             state["error"] = f"搜索到 {len(candidates)} 个候选，筛选后无值得入库的页面"
             state["finished_at"] = time.time()
@@ -152,7 +153,7 @@ class SearcherAgent(BaseAgent):
         except CrawlSubmitError as e:
             # 活跃爬取达上限等：检索结果丢弃，子题照常编材料（补爬是增强不是依赖）
             logger.warning("[searcher:%s] 子爬取未提交（%s），检索结果放弃", self.agent_id, e)
-        state["status"] = "done"
+        state["status"] = ProgressStatus.DONE
         state["phase"] = ""
         state["child_task_id"] = child_id
         state["finished_at"] = time.time()
@@ -170,9 +171,9 @@ class SearcherAgent(BaseAgent):
             return True
         row = dao.get(task.id)
         if row is not None and row.status == TaskStatus.CANCELED:
-            state["status"] = "canceled"
+            state["status"] = ProgressStatus.CANCELED
         else:
-            state["status"] = "failed"
+            state["status"] = ProgressStatus.FAILED
             state["error"] = "任务被系统中断（超时回收或状态变更），本次执行终止"
         state["finished_at"] = time.time()
         _try_save(r, state)
@@ -189,7 +190,7 @@ class SearcherAgent(BaseAgent):
             "url": "",
             "category": "general",
             "max_pages": 0,
-            "status": "searching",
+            "status": ProgressStatus.SEARCHING,
             "topic": payload.get("topic", ""),
             "phase": "",
             "done_pages": 0,

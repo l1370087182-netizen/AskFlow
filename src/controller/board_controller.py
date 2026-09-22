@@ -17,12 +17,13 @@ from DAO.agent_task_dao import AgentTaskDAO
 from database.session import get_db
 from model.AgentTaskModel import AgentTaskModel, TaskKind, TaskStatus
 from model.InterviewRecordModel import InterviewRecordModel
+from model.ProgressState import ProgressStatus, view_status
 from model.UserModel import UserModel
 from service.knowledge_service import (
+    HEARTBEAT_TIMEOUT_SEC,
     TASK_KEY,
     _redis,
     _synth_state,
-    _view_by_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,9 +49,7 @@ def _item_view(t: AgentTaskModel, crawl_progress: dict | None = None) -> dict:
     out = t.output or {}
     payload = t.payload or {}
     # 爬取链路仍活跃（检索中/排队/爬取中）才算等待——结束后子题即恢复可认领
-    chain_active = bool(crawl_progress) and crawl_progress.get("status") in (
-        "pending", "running", "searching"
-    )
+    chain_active = bool(crawl_progress) and crawl_progress.get("status") in ProgressStatus.ACTIVE
     return {
         "task_id": t.id,
         "topic": payload.get("topic", ""),
@@ -108,7 +107,7 @@ def _crawl_progress_map(db: Session, ref_ids: list[str]) -> dict:
         if rid not in rows:
             continue  # 引用的任务行丢了（极端情况）：不展示进度条
         eff = rows[follow.get(rid, rid)]
-        state = _view_by_db(eff, states.get(eff.id) or _synth_state(eff))
+        state = view_status(eff, states.get(eff.id) or _synth_state(eff), HEARTBEAT_TIMEOUT_SEC)
         out[rid] = {
             "kind": eff.kind,
             "status": state["status"],
@@ -143,7 +142,7 @@ def create_goal(
         payload={"goal": body.goal.strip()},
         agent="api",
     )
-    return {"task_id": task.id, "status": "pending"}
+    return {"task_id": task.id, "status": ProgressStatus.PENDING}
 
 
 @router.post("/from-interview", status_code=202)
@@ -173,7 +172,7 @@ def from_interview(
         payload={"interview_record_id": rec.id, "goal": f"面试补强 · {rec.jd_title or '模拟面试'}"},
         agent="api",
     )
-    return {"task_id": task.id, "status": "pending"}
+    return {"task_id": task.id, "status": ProgressStatus.PENDING}
 
 
 @router.get("/")
